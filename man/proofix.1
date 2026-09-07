@@ -1,0 +1,105 @@
+.TH PROOFIX 1 "September 2026" "proofix 0.1.0" "User Commands"
+.SH NAME
+proofix \- fix typos and punctuation in Markdown, under audit
+.SH SYNOPSIS
+.B proofix
+.I input.md
+.RI [ options ]
+.SH DESCRIPTION
+.B proofix
+corrects typos and punctuation in a Markdown file. Every change is one
+bounded, logged, reasoned edit; the model never rewrites prose. Run it
+after
+.BR stylefix (1)
+and before
+.BR mdmemo (1).
+.PP
+Three tiers:
+.TP
+.B mechanical
+A space before a comma or period, a missing space after one, doubled
+punctuation, doubled words, known misspellings. Found by LanguageTool's
+single-answer rules and the typos tool; applied outright.
+.TP
+.B adjudicated
+Unknown words and grammar rules with candidate fixes. LanguageTool
+proposes; a local model picks one or KEEP from the sentence and the rule's
+message.
+.TP
+.B commas
+Comma placement, which no rule engine detects. The model returns the
+sentence with commas corrected; a diff guard admits only insertions and
+deletions of commas and rejects anything else. Comma splices and other
+faults the model notices are reported as notes, not changed. Serial
+commas are left to stylefix's style guide.
+.PP
+Code, link targets, URLs, HTML and front matter are never touched.
+LanguageTool runs twice: mechanical fixes first, then judgement calls on
+the cleaned text.
+.SH OPTIONS
+.TP
+.BI \-o ", " \-\-output " FILE"
+Default: the input name with .proofed before the extension.
+.TP
+.BR \-i ", " \-\-in\-place
+Overwrite the input.
+.TP
+.BR \-\-target " {us|uk}"
+Variety the document is written in. Default us.
+.TP
+.BI \-\-accept " FILE"
+Extra words never flagged as misspelled. ~/.config/proofix/accept.txt and
+stylefix's accept lists are also honoured.
+.TP
+.B \-\-no\-lt
+Skip LanguageTool (the first two tiers).
+.TP
+.BR \-\-lt\-level " {default|picky}"
+LanguageTool rule level.
+.TP
+.B \-\-no\-typos
+Skip the typos pre-pass.
+.TP
+.BR \-\-commas " {gated|all|none}"
+Which sentences the comma tier sends to the model. gated (default): those
+with a comma, an introductory opener, a clause trigger, or clauses joined
+by a conjunction. all: every sentence. none: skip the tier.
+.TP
+.BI \-\-max\-sentences " N"
+Cap on sentences sent to the comma tier.
+.TP
+.BR \-\-optional\-commas " {leave|add}"
+Commas that are optional by convention: leave as written (default) or
+add.
+.TP
+.BR \-\-llm " {auto|dgx|ollama|none}" ", " \-\-url ", " \-\-model ", " \-\-timeout
+Model endpoint, as in stylefix. With none, tiers two and three are
+reported, not applied.
+.TP
+.BI \-\-min\-confidence " X"
+Decisions below this are not applied. Default 0.8.
+.TP
+.BI \-\-parallel " N"
+Concurrent model requests. Default 4.
+.TP
+.BI \-\-cache " FILE" ", " \-\-no\-cache
+Decision cache, default .proofix/cache.json (commas in commas.json next to it).
+.TP
+.BI \-\-report " FILE" ", " \-\-no\-report
+Markdown report, default <output>.report.md.
+.TP
+.B \-\-dry\-run
+Print a diff, write nothing.
+.TP
+.B \-\-changes
+Print every change to standard error as it is made.
+.SH PERFORMANCE
+On a 20-page document (8,000 words) with a local 27B model and 8 parallel
+requests: LanguageTool 4.5 s per pass; the comma tier 19 s for the 260
+sentences that pass the gate; about a minute in all. Linear in length.
+Decisions are cached by sentence.
+.SH SEE ALSO
+.BR stylefix (1),
+.BR mdmemo (1),
+.BR languagetool (1),
+.BR typos (1).

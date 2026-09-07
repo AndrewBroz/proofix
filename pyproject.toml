@@ -1,0 +1,25 @@
+[project]
+name = "proofix"
+version = "0.1.0"
+description = "Fix typos and punctuation in Markdown: LanguageTool detects, a local model adjudicates, comma placement is corrected under a diff guard."
+requires-python = ">=3.11"
+dependencies = ["adjudicate"]
+
+[project.scripts]
+proofix = "proofix.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["proofix"]
+
+[tool.uv.sources]
+adjudicate = { path = "../adjudicate", editable = true }
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
