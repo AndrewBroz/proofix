@@ -10,10 +10,10 @@ import json
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from adjudicate import Edit, Endpoint, LLMError, prose_regions, strip_thinking
+from adjudicate import Edit, Endpoint, LLMError, protected_spans, strip_thinking
 
 VARIETY = {"us": "American English", "uk": "British English"}
 
@@ -63,11 +63,23 @@ def needs_check(sentence: str) -> bool:
     return words >= 12 and bool(_CLAUSE_JOIN.search(sentence))
 
 
+PLACEHOLDER = "⟨…⟩"
+
+
 @dataclass
 class Sentence:
-    start: int
+    start: int                       # absolute offset of the first character
     end: int
-    text: str
+    text: str                        # what the model sees: protected spans as PLACEHOLDER
+    segments: list[tuple[int, int, int]] = field(default_factory=list)
+    # (display_start, display_end, absolute_start) for each real-text run
+
+    def to_absolute(self, display_pos: int) -> int | None:
+        """Absolute offset for a position in `text`; None inside a placeholder."""
+        for ds, de, a in self.segments:
+            if ds <= display_pos <= de:
+                return a + (display_pos - ds)
+        return None
 
 
 @dataclass
@@ -79,31 +91,86 @@ class CommaResult:
     status: str                 # unchanged | edit | rejected | low | note | error
 
 
+def _paragraphs(text: str):
+    """(start, end) of paragraphs outside front matter and fenced code."""
+    from adjudicate.context import _FENCE, _FRONT   # noqa
+    blocked = []
+    m = _FRONT.match(text)
+    if m:
+        blocked.append((0, m.end()))
+    blocked += [m.span() for m in _FENCE.finditer(text)]
+    cursor = 0
+    for bs, be in sorted(blocked):
+        if bs > cursor:
+            yield from _split_paras(text, cursor, bs)
+        cursor = be
+    if cursor < len(text):
+        yield from _split_paras(text, cursor, len(text))
+
+
+def _split_paras(text: str, lo: int, hi: int):
+    for pm in re.finditer(r"[^\n]+(?:\n[^\n]+)*", text[lo:hi]):
+        yield lo + pm.start(), lo + pm.end()
+
+
+def _display(text: str, a: int, b: int, spans: list[tuple[int, int]]) -> tuple[str, list[tuple[int, int, int]]]:
+    """Text of [a, b) with protected spans replaced by PLACEHOLDER, plus the
+    segment map back to absolute offsets."""
+    out, segs, cursor = [], [], a
+    dpos = 0
+    for s_, e_ in spans:
+        if e_ <= a or s_ >= b:
+            continue
+        s_, e_ = max(s_, a), min(e_, b)
+        if s_ > cursor:
+            piece = text[cursor:s_]
+            segs.append((dpos, dpos + len(piece), cursor))
+            out.append(piece); dpos += len(piece)
+        out.append(PLACEHOLDER); dpos += len(PLACEHOLDER)
+        cursor = e_
+    if cursor < b:
+        piece = text[cursor:b]
+        segs.append((dpos, dpos + len(piece), cursor))
+        out.append(piece)
+    return "".join(out), segs
+
+
 def sentences(text: str, min_words: int = 4, gate: bool = True) -> list[Sentence]:
-    """Sentences in prose regions, excluding table rows and headings, and
-    (with gate) only those where a comma question can arise."""
+    """Sentences in prose, excluding table rows and headings, with protected
+    spans (code, link targets, URLs, HTML) shown as a placeholder so a link
+    does not split its sentence. With gate, only sentences where a comma
+    question can arise."""
+    spans = protected_spans(text)
     out: list[Sentence] = []
-    for rs, re_ in prose_regions(text):
-        region = text[rs:re_]
-        for para_m in re.finditer(r"[^\n]+(?:\n[^\n]+)*", region):
-            para = para_m.group(0)
-            pstart = rs + para_m.start()
-            first = para.split("\n", 1)[0]
-            if _MD_LINE.match(first) and (first.lstrip().startswith(("#", "|"))):
+    for ps, pe in _paragraphs(text):
+        first = text[ps:pe].split("\n", 1)[0]
+        if first.lstrip().startswith(("#", "|")):
+            continue
+        display, segs = _display(text, ps, pe, spans)
+        cursor = 0
+        pieces = []
+        for m in _SENT_END.finditer(display):
+            pieces.append((cursor, m.start() + len(m.group(0).rstrip())))
+            cursor = m.end()
+        pieces.append((cursor, len(display)))
+        for a, b in pieces:
+            raw = display[a:b]
+            lead = len(raw) - len(raw.lstrip())
+            body = raw.strip()
+            if not body:
                 continue
-            cursor = 0
-            pieces = []
-            for m in _SENT_END.finditer(para):
-                pieces.append((cursor, m.start() + len(m.group(0).rstrip())))
-                cursor = m.end()
-            pieces.append((cursor, len(para)))
-            for a, b in pieces:
-                s = para[a:b]
-                lead = len(s) - len(s.lstrip())
-                s2 = s.strip()
-                if len(s2.split()) < min_words or (gate and not needs_check(s2)):
-                    continue
-                out.append(Sentence(pstart + a + lead, pstart + a + lead + len(s2), s2))
+            words = len(body.replace(PLACEHOLDER, "").split())
+            if words < min_words or (gate and not needs_check(body)):
+                continue
+            da, db = a + lead, a + lead + len(body)
+            # segments clipped to this sentence, re-based to its display text
+            fixed = []
+            for ds, de, ab in [(ds - da, de - da, ab) for ds, de, ab in segs if de > da and ds < db]:
+                clip = max(ds, 0)
+                fixed.append((clip, min(de, len(body)), ab + (clip - ds)))
+            abs_start = fixed[0][2] if fixed else ps
+            abs_end = fixed[-1][2] + (fixed[-1][1] - fixed[-1][0]) if fixed else ps
+            out.append(Sentence(abs_start, abs_end, body, fixed))
     return out
 
 
@@ -117,16 +184,20 @@ def only_commas(a: str, b: str) -> bool:
 
 
 def comma_edits(text: str, s: Sentence, new: str) -> list[Edit]:
-    """Edits (line, col based) turning s.text into new; only comma changes."""
-    from adjudicate.apply import line_offsets  # noqa: F401
+    """Edits (line, col based) turning s.text into new; only comma changes.
+    Returns [] if any change falls inside a placeholder."""
     edits = []
     for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, s.text, new, autojunk=False).get_opcodes():
         if op == "equal":
             continue
-        pos = s.start + i1
+        pos = s.to_absolute(i1)
+        if pos is None or (i2 > i1 and s.to_absolute(i2) is None):
+            return []
+        original, repl = s.text[i1:i2], new[j1:j2]
+        if original and text[pos:pos + len(original)] != original:
+            return []
         line = text.count("\n", 0, pos) + 1
         col = pos - (text.rfind("\n", 0, pos) + 1) + 1
-        original, repl = s.text[i1:i2], new[j1:j2]
         edits.append(Edit(line, col, col + len(original) - 1, original, repl, "commas"))
     return edits
 

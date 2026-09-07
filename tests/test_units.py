@@ -85,3 +85,18 @@ def test_typos_edits_respect_protection():
     assert [(e.start, e.original) for e in edits] == [(1, "Teh"), (27, "recieved")]
     new, skipped = apply_edits(text, edits)
     assert new == "# T\n\nThe `recieved` report was received.\n" and not skipped
+
+
+def test_sentences_span_links_and_map_back():
+    from proofix.commas import PLACEHOLDER
+    text = "Intro.\n\nThe report, [which came](http://x.y/z) was ignored by `code` and all.\n"
+    ss = sentences(text, gate=False)
+    assert len(ss) == 1
+    s = ss[0]
+    assert s.text == f"The report, [which came{PLACEHOLDER} was ignored by {PLACEHOLDER} and all."
+    edits = comma_edits(text, s, f"The report, [which came{PLACEHOLDER}, was ignored by {PLACEHOLDER} and all.")
+    new, skipped = apply_edits(text, edits)
+    assert not skipped
+    assert new == "Intro.\n\nThe report, [which came](http://x.y/z), was ignored by `code` and all.\n"
+    # an edit inside a placeholder is refused
+    assert comma_edits(text, s, s.text.replace(PLACEHOLDER, "⟨,…⟩", 1)) == []
