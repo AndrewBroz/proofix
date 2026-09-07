@@ -106,10 +106,28 @@ def test_consistency_families_and_items():
     from proofix.consistency import items
     text = ("Third-party auditors and third-party monitors are needed. Every third party risk "
             "assessor must be third-party certified. A `third party` in code. Frontier AI labs, "
-            "frontier AI labs, frontier AI labs and Frontier AI labs again.\n")
-    its = items(text)
-    words = [(i.word, i.options) for i in its]
-    assert ("third party", ("third-party", "KEEP")) in words
-    assert not any(w == "third-party" for w, _ in words)          # majority is not questioned
-    assert any(w == "Frontier AI" and o[0] == "frontier AI" for w, o in words)
-    assert all(i.source == "consistency" for i in its)
+            "frontier AI labs, frontier AI labs and Frontier AI labs again. America's edge.\n")
+    its, groups = items(text)
+    words = {i.word: i.options for i in its}
+    assert words["third party"] == ("third-party", "KEEP")           # the minority shape
+    assert "third-party" not in words and "Third-party" not in words  # the majority is not asked
+    assert words["Frontier AI"][0] == "frontier AI"
+    assert "s edge" not in words
+
+
+def test_compound_candidates_from_dictionary():
+    from proofix.consistency import items, split_closed
+    text = ("A cyber attack hit the non-profit. Another cyber attack. The longterm plan is a "
+            "long-term plan in the long term. It may be that we can not e-mail them. The geopolitical "
+            "and geo-political views. Highly regarded people.\n")
+    its, groups = items(text, "us")
+    words = {i.word: i.options for i in its}
+    assert words["cyber attack"] == ("cyberattack", "KEEP")
+    assert len(groups[next(i.id for i in its if i.word == "cyber attack")]) == 2   # one decision, two places
+    assert words["non-profit"] == ("nonprofit", "KEEP")
+    assert words["longterm"] == ("long-term", "long term", "KEEP")
+    assert words["geo-political"] == ("geopolitical", "KEEP") and "geopolitical" not in words
+    assert "may be" not in words and "can not" not in words
+    assert words["e-mail"] == ("email", "KEEP")
+    assert split_closed("thirdparty", "us") == ("third", "party")
+    assert split_closed("cyberattack", "us") is None

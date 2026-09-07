@@ -1,4 +1,4 @@
-.TH PROOFIX 1 "September 2026" "proofix 0.2.0" "User Commands"
+.TH PROOFIX 1 "September 2026" "proofix 0.3.0" "User Commands"
 .SH NAME
 proofix \- fix typos and punctuation in Markdown, under audit
 .SH SYNOPSIS
@@ -26,11 +26,14 @@ Unknown words and grammar rules with candidate fixes. LanguageTool
 proposes; a local model picks one or KEEP from the sentence and the rule's
 message.
 .TP
-.B consistency
-The same term written two ways in one document ("third-party" and "third
-party"; "Frontier AI" and "frontier AI"). Families are found
-deterministically; the minority occurrences are put to the model with the
-rule that a compound modifier before a noun is hyphenated and a noun
+.B compounds and consistency
+How a compound is written: closed, hyphenated or open ("cyberattack",
+"non-profit", "long term"), and terms the document capitalises two ways.
+Candidates come from the dictionaries: an open or hyphenated pair whose
+closed form is a word, a non-word that splits into two words, or anything
+the document writes two ways. The model chooses closed, hyphenated, open
+or KEEP, told which dictionary rules (Merriam-Webster for US, Oxford for
+UK) and that a compound modifier before a noun is hyphenated while a noun
 phrase is open, so "a third party" survives and "third party assessors"
 does not.
 .TP
@@ -69,7 +72,10 @@ LanguageTool rule level.
 Skip the typos pre-pass.
 .TP
 .B \-\-no\-consistency
-Skip the consistency tier.
+Skip the compounds and consistency tier.
+.TP
+.BI \-\-style " GUIDE"
+Style guide, used only for its hyphenation habit: ap hyphenates less.
 .TP
 .BR \-\-commas " {gated|all|none}"
 Which sentences the comma tier sends to the model. gated (default): those

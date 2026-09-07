@@ -41,6 +41,8 @@ class StubModel(BaseHTTPRequestHandler):
                     options = line.split("options: ")[1].split(" | ")
                     word = line.split('word: "')[1].split('"')[0]
                     choice = options[0] if word[0].islower() or word == "Teh" else "KEEP"
+                    if word in ("third-party", "long-term"):
+                        choice = "KEEP"                            # already right as modifiers
                     if "However" in line:
                         choice = "KEEP"
                     decisions.append({"id": num, "choice": choice, "confidence": 0.9, "reason": "stub"})

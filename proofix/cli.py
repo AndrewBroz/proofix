@@ -73,8 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-typos", action="store_true",
                    help="skip the `typos` pre-pass even if installed")
     p.add_argument("--no-consistency", action="store_true",
-                   help="skip the consistency tier (the same term hyphenated, open or capitalised "
-                        "two ways within the document)")
+                   help="skip the compounds and consistency tier (closed, hyphenated or open "
+                        "compounds; terms capitalised two ways)")
+    p.add_argument("--style", default="none", metavar="GUIDE",
+                   help="style guide, only for its hyphenation habit (ap hyphenates less); "
+                        "chicago, gpo, ap, apa, oxford, guardian or none")
     p.add_argument("--commas", choices=["gated", "all", "none"], default="gated",
                    help="comma tier: gated sends only sentences with a comma, an introductory "
                         "opener, a clause trigger or a conjunction joining clauses; all sends every "
@@ -172,8 +175,6 @@ def main(argv: list[str] | None = None) -> int:
         from .tiers import Partition
         part = Partition([], [], [])
         edits = []
-    if not args.no_consistency and ep is not None:
-        part.items += consistency.items(text, next_id=len(part.items) + 1)
     if True:
         if True:
             if part.items:
@@ -191,6 +192,30 @@ def main(argv: list[str] | None = None) -> int:
         new_text, skipped = apply_edits(text, edits)
         applied += [e for e in edits if e not in skipped]
         text = new_text
+    # Pass 3: compounds and consistency, on the text as it now stands.
+    if not args.no_consistency and ep is not None:
+        c_items, groups = consistency.items(text, args.target, args.style)
+        if c_items:
+            cache = Cache(None if args.no_cache else args.cache)
+            c_decisions = adjudicate(ep, f"proofix|{args.target}", c_items, cache,
+                                     parallel=args.parallel, verbose=args.verbose,
+                                     system=system_prompt(TASK.format(variety=VARIETY[args.target])),
+                                     log_name="proofix")
+            c_edits = []
+            for d in c_decisions:
+                if d.choice is not None and d.confidence < args.min_confidence:
+                    d.reason, d.choice = f"low confidence ({d.confidence:.2f}): {d.reason}", None
+                if not d.replacement:
+                    continue
+                for o in groups[d.item.id]:
+                    line = text.count("\n", 0, o.start) + 1
+                    col = o.start - (text.rfind("\n", 0, o.start) + 1) + 1
+                    c_edits.append(Edit(line, col, col + (o.end - o.start) - 1, o.form,
+                                        consistency._recase(o.form, d.replacement.lower()), "adjudicated"))
+            decisions += c_decisions
+            new_text, skipped = apply_edits(text, c_edits)
+            applied += [e for e in c_edits if e not in skipped]
+            text = new_text
     new_text = text
 
     comma_results = []

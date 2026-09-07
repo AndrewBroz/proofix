@@ -17,7 +17,7 @@ target variety, and before [mdmemo](../mdmemo) turns the file into a PDF.
 |---|---|---|---|
 | 1 mechanical | space before a comma or period, missing space after one, doubled punctuation, doubled words, known misspellings | LanguageTool's single-answer rules, the `typos` tool, a small missing-space rule | applied outright |
 | 2 adjudicated | unknown words with candidate spellings, grammar rules with candidate fixes ("a comma may be missing after However") | LanguageTool proposes, a local model picks one or KEEP from the sentence and the rule's message | model |
-| 3 consistency | the same term written two ways in one document: "third-party" eight times and "third party" once, "Frontier AI" against "frontier AI" | families found deterministically (hyphenated, open and closed compounds; capitalisation of two-word terms, sentence starts excluded); the minority occurrences are put to the model with the compound-modifier rule | model |
+| 3 compounds and consistency | how a compound is written: "cyber attack" or "cyberattack", "non-profit" or "nonprofit", "long term" or "long-term"; and terms the document capitalises two ways | candidates found from the dictionaries (an open or hyphenated pair whose closed form is a word; a non-word that splits into two words; anything the document itself writes two ways). The model chooses closed, hyphenated, open or KEEP, told which dictionary rules (Merriam-Webster for US, Oxford for UK) and the rule that a compound modifier before a noun is hyphenated while a noun phrase is open | model |
 | 4 commas | a comma between subject and verb, a missing comma after an introductory phrase or around a non-restrictive clause, a stray comma before "and" joining objects: nothing a rule engine detects | the model returns the sentence with commas corrected; a diff guard admits only insertions and deletions of commas, rejects anything else, and reports it | model, under the guard |
 
 LanguageTool runs twice: once for the mechanical fixes, which are applied,
@@ -27,7 +27,9 @@ fixed. Code spans, fenced code, link targets, URLs, HTML and front matter
 are never touched; link text is prose and is checked.
 
 Variety spellings ("programme", "analysed") are left to stylefix. Serial
-commas are left to stylefix's style guide. Comma splices are not "fixed"
+commas are left to stylefix's style guide. Compound spelling follows the
+target variety's dictionary, because that is what every style guide
+defers to; the guide only adds AP's lighter hyphenation. Comma splices are not "fixed"
 by changing punctuation; they are reported as notes.
 
 ## What goes to the model, and how much
@@ -36,8 +38,9 @@ Only the residue after the rule engines:
 
 - Tier 2: one item per LanguageTool suggestion, with the sentence and one
   neighbour as context. Typically 1 to 4 per page.
-- Tier 3: only the minority occurrences of an inconsistent term, typically
-  a handful per document.
+- Tier 3: one item per occurrence of a compound that has a question: a
+  closed form exists, or the document writes it two ways. A document that
+  is consistent and closes what the dictionary closes sends nothing.
 - Tier 4: sentences pass a gate first. A sentence is sent only if it
   contains a comma, opens with an introductory word (After, Although,
   However, In, When ...), contains a clause trigger (which, for example,
