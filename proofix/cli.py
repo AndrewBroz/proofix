@@ -15,6 +15,7 @@ from adjudicate import Cache, Edit, adjudicate, apply_edits, resolve_endpoint, s
 from . import __version__, report
 from .commas import CommaCache, correct_commas
 from .lt import LTError, find_languagetool, run_languagetool
+from . import consistency
 from .tiers import partition, typos_edits
 
 DESCRIPTION = """\
@@ -71,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="LanguageTool rule level (default: %(default)s)")
     p.add_argument("--no-typos", action="store_true",
                    help="skip the `typos` pre-pass even if installed")
+    p.add_argument("--no-consistency", action="store_true",
+                   help="skip the consistency tier (the same term hyphenated, open or capitalised "
+                        "two ways within the document)")
     p.add_argument("--commas", choices=["gated", "all", "none"], default="gated",
                    help="comma tier: gated sends only sentences with a comma, an introductory "
                         "opener, a clause trigger or a conjunction joining clauses; all sends every "
@@ -164,6 +168,13 @@ def main(argv: list[str] | None = None) -> int:
         part = partition(text, matches, accept, adjudicate_available=ep is not None)
         edits = [e for e in part.edits if e.source == "MISSING_SPACE"]   # anything pass 1 exposed
         review = part.review
+    else:
+        from .tiers import Partition
+        part = Partition([], [], [])
+        edits = []
+    if not args.no_consistency and ep is not None:
+        part.items += consistency.items(text, next_id=len(part.items) + 1)
+    if True:
         if True:
             if part.items:
                 cache = Cache(None if args.no_cache else args.cache)

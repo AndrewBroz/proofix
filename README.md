@@ -11,13 +11,14 @@ proofix draft.md --target uk --changes
 Run it after [stylefix](../stylefix), so the grammar checker sees the
 target variety, and before [mdmemo](../mdmemo) turns the file into a PDF.
 
-## Three tiers
+## Four tiers
 
 | tier | what | how | who decides |
 |---|---|---|---|
 | 1 mechanical | space before a comma or period, missing space after one, doubled punctuation, doubled words, known misspellings | LanguageTool's single-answer rules, the `typos` tool, a small missing-space rule | applied outright |
 | 2 adjudicated | unknown words with candidate spellings, grammar rules with candidate fixes ("a comma may be missing after However") | LanguageTool proposes, a local model picks one or KEEP from the sentence and the rule's message | model |
-| 3 commas | a comma between subject and verb, a missing comma after an introductory phrase or around a non-restrictive clause, a stray comma before "and" joining objects: nothing a rule engine detects | the model returns the sentence with commas corrected; a diff guard admits only insertions and deletions of commas, rejects anything else, and reports it | model, under the guard |
+| 3 consistency | the same term written two ways in one document: "third-party" eight times and "third party" once, "Frontier AI" against "frontier AI" | families found deterministically (hyphenated, open and closed compounds; capitalisation of two-word terms, sentence starts excluded); the minority occurrences are put to the model with the compound-modifier rule | model |
+| 4 commas | a comma between subject and verb, a missing comma after an introductory phrase or around a non-restrictive clause, a stray comma before "and" joining objects: nothing a rule engine detects | the model returns the sentence with commas corrected; a diff guard admits only insertions and deletions of commas, rejects anything else, and reports it | model, under the guard |
 
 LanguageTool runs twice: once for the mechanical fixes, which are applied,
 and again on the cleaned text for the judgement calls, so overlapping
@@ -35,7 +36,9 @@ Only the residue after the rule engines:
 
 - Tier 2: one item per LanguageTool suggestion, with the sentence and one
   neighbour as context. Typically 1 to 4 per page.
-- Tier 3: sentences pass a gate first. A sentence is sent only if it
+- Tier 3: only the minority occurrences of an inconsistent term, typically
+  a handful per document.
+- Tier 4: sentences pass a gate first. A sentence is sent only if it
   contains a comma, opens with an introductory word (After, Although,
   However, In, When ...), contains a clause trigger (which, for example,
   such as, said ...), or is long and joins clauses with a conjunction.

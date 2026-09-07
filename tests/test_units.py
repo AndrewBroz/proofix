@@ -100,3 +100,16 @@ def test_sentences_span_links_and_map_back():
     assert new == "Intro.\n\nThe report, [which came](http://x.y/z), was ignored by `code` and all.\n"
     # an edit inside a placeholder is refused
     assert comma_edits(text, s, s.text.replace(PLACEHOLDER, "⟨,…⟩", 1)) == []
+
+
+def test_consistency_families_and_items():
+    from proofix.consistency import items
+    text = ("Third-party auditors and third-party monitors are needed. Every third party risk "
+            "assessor must be third-party certified. A `third party` in code. Frontier AI labs, "
+            "frontier AI labs, frontier AI labs and Frontier AI labs again.\n")
+    its = items(text)
+    words = [(i.word, i.options) for i in its]
+    assert ("third party", ("third-party", "KEEP")) in words
+    assert not any(w == "third-party" for w, _ in words)          # majority is not questioned
+    assert any(w == "Frontier AI" and o[0] == "frontier AI" for w, o in words)
+    assert all(i.source == "consistency" for i in its)

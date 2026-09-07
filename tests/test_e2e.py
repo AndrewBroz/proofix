@@ -91,6 +91,8 @@ def test_end_to_end(tmp_path, replay_lt, stub_url, capsys):
     assert "The report, which was published in May, was ignored" in text
     assert "It was late, we went home anyway" in text          # semicolon rewrite rejected
     assert "non-comma change" in err and "stub note" in err
+    # consistency tier
+    assert "Every third-party risk assessor" in text
     # protection
     assert "`recieved`" in text and "[the link](http://x.y/teh)" in text   # text fixed, target kept
     assert "issues; the budget" in text
