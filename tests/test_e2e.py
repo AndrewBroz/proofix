@@ -38,7 +38,7 @@ class StubModel(BaseHTTPRequestHandler):
             for line in user.splitlines():
                 if line.startswith("Item "):
                     num = int(line.split()[1])
-                    options = line.split("options: ")[1].split(" | ")
+                    options = [o.split("] ", 1)[-1] for o in line.split("options: ")[1].split(" | ")]
                     word = line.split('word: "')[1].split('"')[0]
                     choice = options[0] if word[0].islower() or word == "Teh" else "KEEP"
                     if word in ("third-party", "long-term"):
