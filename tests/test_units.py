@@ -131,3 +131,19 @@ def test_compound_candidates_from_dictionary():
     assert words["e-mail"] == ("email", "KEEP")
     assert split_closed("thirdparty", "us") == ("third", "party")
     assert split_closed("cyberattack", "us") is None
+
+
+def test_hygiene_entities_and_invisibles():
+    from proofix.hygiene import normalize_text, plan
+    text = ("correct&#32;**bold** &quot;q&quot; an em&mdash;dash, keep &lt;tag&gt; and &amp;co and "
+            "&nbsp;here, zero\u200bwidth, soft\u00adhyphen, code `&#32;` and [x](http://a/b&#32;c).\r\n"
+            "caf\u0065\u0301\r\n")
+    text, notes = normalize_text(text)
+    assert "\r" not in text and "café" in text and len(notes) == 2
+    edits, plan_notes = plan(text)
+    new, skipped = apply_edits(text, edits)
+    assert not skipped
+    assert new.startswith("correct **bold** \"q\" an em—dash, keep &lt;tag&gt; and &amp;co and &nbsp;here, "
+                          "zerowidth, softhyphen, code `&#32;` and [x](http://a/b&#32;c).\n")
+    msgs = " ".join(n.message for n in plan_notes)
+    assert "&lt;" in msgs and "&amp;" in msgs and "&nbsp;" in msgs and "zero-width space" in msgs

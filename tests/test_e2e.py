@@ -95,6 +95,9 @@ def test_end_to_end(tmp_path, replay_lt, stub_url, capsys):
     assert "non-comma change" in err and "stub note" in err
     # consistency tier
     assert "Every third-party risk assessor" in text
+    # hygiene
+    assert "correct **unsanctioned actions** — see &lt;config&gt;." in text
+    assert "text hygiene" in err and "&lt;" in err
     # protection
     assert "`recieved`" in text and "[the link](http://x.y/teh)" in text   # text fixed, target kept
     assert "issues; the budget" in text

@@ -1,4 +1,4 @@
-.TH PROOFIX 1 "September 2026" "proofix 0.3.0" "User Commands"
+.TH PROOFIX 1 "September 2026" "proofix 0.4.0" "User Commands"
 .SH NAME
 proofix \- fix typos and punctuation in Markdown, under audit
 .SH SYNOPSIS
@@ -14,7 +14,16 @@ after
 and before
 .BR mdmemo (1).
 .PP
-Four tiers:
+Five tiers:
+.TP
+.B hygiene
+Text that renders fine but is not what it looks like. HTML entities that
+Markdown can carry as plain characters (&#32; is a space, &quot; a quote,
+&mdash; a dash) are decoded; entities that would change Markdown's parsing
+(&lt;, &gt;, &amp;) or carry meaning (&nbsp;) are left alone and reported.
+Zero-width spaces, byte-order marks, soft hyphens and control characters
+are removed. Windows line endings and decomposed accents are normalised
+first. Every change is logged.
 .TP
 .B mechanical
 A space before a comma or period, a missing space after one, doubled
@@ -70,6 +79,9 @@ LanguageTool rule level.
 .TP
 .B \-\-no\-typos
 Skip the typos pre-pass.
+.TP
+.B \-\-no\-hygiene
+Skip the hygiene tier.
 .TP
 .B \-\-no\-consistency
 Skip the compounds and consistency tier.

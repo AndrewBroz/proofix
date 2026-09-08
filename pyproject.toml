@@ -1,6 +1,6 @@
 [project]
 name = "proofix"
-version = "0.3.1"
+version = "0.4.0"
 description = "Fix typos and punctuation in Markdown: LanguageTool detects, a local model adjudicates, comma placement is corrected under a diff guard."
 requires-python = ">=3.11"
 dependencies = ["adjudicate"]

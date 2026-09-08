@@ -11,10 +11,11 @@ proofix draft.md --target uk --changes
 Run it after [stylefix](../stylefix), so the grammar checker sees the
 target variety, and before [mdmemo](../mdmemo) turns the file into a PDF.
 
-## Four tiers
+## Five tiers
 
 | tier | what | how | who decides |
 |---|---|---|---|
+| 0 hygiene | text that renders fine but is not what it looks like: HTML entities Markdown can carry plainly (`&#32;`, `&quot;`, `&mdash;`), zero-width spaces, byte-order marks, soft hyphens, control characters, Windows line endings, decomposed accents | fixed deterministically and logged; entities that would change Markdown's parsing (`&lt;`, `&gt;`, `&amp;`) or carry meaning (`&nbsp;`) are left alone and reported | applied outright, or noted |
 | 1 mechanical | space before a comma or period, missing space after one, doubled punctuation, doubled words, known misspellings | LanguageTool's single-answer rules, the `typos` tool, a small missing-space rule | applied outright |
 | 2 adjudicated | unknown words with candidate spellings, grammar rules with candidate fixes ("a comma may be missing after However") | LanguageTool proposes, a local model picks one or KEEP from the sentence and the rule's message | model |
 | 3 compounds and consistency | how a compound is written: "cyber attack" or "cyberattack", "non-profit" or "nonprofit", "long term" or "long-term"; and terms the document capitalises two ways | candidates found from the dictionaries (an open or hyphenated pair whose closed form is a word; a non-word that splits into two words; anything the document itself writes two ways). The model chooses closed, hyphenated, open or KEEP, told which dictionary rules (Merriam-Webster for US, Oxford for UK) and the rule that a compound modifier before a noun is hyphenated while a noun phrase is open | model |

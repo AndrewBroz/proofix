@@ -16,7 +16,8 @@ def _ctx(text: str, e: Edit, width: int = 28) -> str:
 
 
 def changelog(text: str, applied: list[Edit], decisions: list[Decision],
-              commas: list[CommaResult], review: list[Match], typos_fixed: int) -> str:
+              commas: list[CommaResult], review: list[Match], typos_fixed: int,
+              hygiene_notes: list[str] | None = None) -> str:
     by_pos = {(d.item.line, d.item.start): d for d in decisions}
     out = [f"proofix changes: {len(applied)} edit(s)" + (f", {typos_fixed} by typos" if typos_fixed else "")]
     for e in sorted(applied, key=lambda e: (e.line, e.start)):
@@ -28,6 +29,10 @@ def changelog(text: str, applied: list[Edit], decisions: list[Decision],
             how = "commas (see below)"
         out.append(f"  L{e.line:<4} {e.original!r} -> {e.replacement!r:16} {how}")
         out.append(f"        {_ctx(text, e)}")
+    if hygiene_notes:
+        out.append(f"text hygiene: {len(hygiene_notes)} note(s)")
+        for n in hygiene_notes:
+            out.append(f"  {n}")
     kept = [d for d in decisions if d.choice == "KEEP"]
     if kept:
         out.append(f"kept after adjudication: {len(kept)}")

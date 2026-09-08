@@ -15,7 +15,7 @@ from adjudicate import Cache, Edit, adjudicate, apply_edits, resolve_endpoint, s
 from . import __version__, report
 from .commas import CommaCache, correct_commas
 from .lt import LTError, find_languagetool, run_languagetool
-from . import consistency
+from . import consistency, hygiene
 from .tiers import partition, typos_edits
 
 DESCRIPTION = """\
@@ -72,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="LanguageTool rule level (default: %(default)s)")
     p.add_argument("--no-typos", action="store_true",
                    help="skip the `typos` pre-pass even if installed")
+    p.add_argument("--no-hygiene", action="store_true",
+                   help="skip text hygiene (HTML entities, invisible characters, line endings, "
+                        "decomposed accents)")
     p.add_argument("--no-consistency", action="store_true",
                    help="skip the compounds and consistency tier (closed, hyphenated or open "
                         "compounds; terms capitalised two ways)")
@@ -143,8 +146,15 @@ def main(argv: list[str] | None = None) -> int:
     ep = resolve_endpoint(args.llm, args.model, args.url, timeout=args.timeout)
 
     original = text
-    edits: list[Edit] = [] if args.no_typos else run_typos(text)
-    typos_fixed = len(edits)
+    hygiene_notes: list[str] = []
+    edits: list[Edit] = []
+    if not args.no_hygiene:
+        text, hygiene_notes = hygiene.normalize_text(text)
+        h_edits, h_notes = hygiene.plan(text)
+        edits += h_edits
+        hygiene_notes += [f"L{n.line} {n.message}" for n in h_notes]
+    edits += [] if args.no_typos else run_typos(text)
+    typos_fixed = sum(1 for e in edits if e.source == "typos")
     decisions = []
     review = []
     lt = find_languagetool() if not args.no_lt else None
@@ -236,7 +246,8 @@ def main(argv: list[str] | None = None) -> int:
             str(args.input), str(output)))
     else:
         output.write_text(new_text, encoding="utf-8")
-    log = report.changelog(original, applied, decisions, comma_results, review, typos_fixed)
+    log = report.changelog(original, applied, decisions, comma_results, review, typos_fixed,
+                           hygiene_notes)
     if args.changes or args.verbose:
         sys.stderr.write(log)
     if not args.no_report and not args.dry_run:
