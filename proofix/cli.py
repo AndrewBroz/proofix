@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import math
 import os
 import shutil
 import subprocess
@@ -21,19 +22,27 @@ from .tiers import partition, typos_edits
 DESCRIPTION = """\
 Fix typos and punctuation in a Markdown file, under audit.
 
-Three tiers, each bounded so every change is one logged, reasoned edit:
+Five tiers, each bounded so every change is one logged, reasoned edit:
 
+0. Hygiene: HTML entities Markdown can carry plainly, zero-width spaces,
+   byte-order marks, soft hyphens, control characters, Windows line endings
+   and decomposed accents are fixed deterministically.
 1. Mechanical faults with one right answer are fixed outright: a space before a
    comma or period, a missing space after one, doubled punctuation, doubled
    words. Detected by LanguageTool (and, if installed, the `typos` tool for
    known misspellings).
-2. Faults with candidate fixes are adjudicated: LanguageTool proposes
-   spellings or grammar fixes, a language model picks one or KEEP from the
-   sentence and the rule's message.
-3. Comma placement, which no rule engine detects, is corrected sentence by
-   sentence by the model under a diff guard: only insertions and deletions of
-   commas are accepted; anything else the model returns is rejected and
-   reported.
+2. Adjudicated: LanguageTool proposes spellings or grammar fixes, and a
+   language model picks one or KEEP from the sentence and the rule's message.
+3. Compounds and consistency: the model chooses closed, hyphenated or open
+   for compounds the dictionaries question ("cyber attack", "non-profit"),
+   and one form for terms the document capitalises two ways.
+4. Commas: comma placement, which no rule engine detects, is corrected
+   sentence by sentence by the model under a diff guard: only insertions and
+   deletions of commas are accepted; anything else the model returns is
+   rejected and reported.
+
+Without a model, tiers 0 and 1 still apply; tier 2's fixes are listed for
+review, tier 3 is skipped and sentences are not checked for commas.
 
 Code spans, fenced code, link targets, URLs, HTML and front matter are never
 touched. Run it after stylefix so LanguageTool sees the target variety.
@@ -48,9 +57,10 @@ examples:
   proofix draft.md --no-commas --llm none
       LanguageTool's mechanical fixes only; nothing needs a model
 
-Requires languagetool on PATH for tiers 1 and 2 (brew install languagetool);
-tier 3 needs only a model. Accept lists: --accept, ~/.config/proofix/accept.txt,
-~/.config/stylefix/accept.txt and ./.stylefix/accept.txt are all honoured.
+Requires languagetool on PATH for tier 1's LanguageTool fixes and for tier 2
+(brew install languagetool); tiers 3 and 4 need only a model. Accept lists:
+--accept, ~/.config/proofix/accept.txt, ~/.config/stylefix/accept.txt,
+./.stylefix/accept.txt and ./.proofix/accept.txt are all honoured.
 
 environment:
   PROOFIX_LLM_URL, PROOFIX_LLM_MODEL, PROOFIX_LLM_KEY
@@ -63,10 +73,24 @@ files:
   ~/.config/proofix/config.toml      [llm] url, model, api_key or api_key_env,
                                      timeout, thinking_switch (proofix only)
   ~/.config/adjudicate/config.toml   the same table, shared with stylefix
+
+Full documentation: https://github.com/AndrewBroz/proofix (man page:
+man/proofix.1 in the source)
 """
 
 TASK = "You are a meticulous copy editor fixing typos and punctuation in a document written in {variety}."
 VARIETY = {"us": "American English", "uk": "British English"}
+
+
+def positive_seconds(text: str) -> float:
+    """argparse type for --timeout: a positive, finite number of seconds."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not (math.isfinite(value) and value > 0):
+        raise argparse.ArgumentTypeError(f"must be a positive number of seconds, not {text}")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,7 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="English variety the document is written in (default: %(default)s)")
     p.add_argument("--accept", type=Path, metavar="FILE",
                    help="extra words to never flag as misspelled, one per line")
-    p.add_argument("--no-lt", action="store_true", help="skip LanguageTool (tiers 1 and 2)")
+    p.add_argument("--no-lt", action="store_true",
+                   help="skip LanguageTool: its tier 1 fixes (typos still runs) and all of tier 2")
     p.add_argument("--lt-level", choices=["default", "picky"], default="default",
                    help="LanguageTool rule level (default: %(default)s)")
     p.add_argument("--no-typos", action="store_true",
@@ -104,12 +129,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--optional-commas", choices=["leave", "add"], default="leave",
                    help="what the comma tier does with commas that are optional by convention "
                         "(default: %(default)s)")
-    p.add_argument("--llm", choices=["auto", "ollama", "none"], default="auto", help="auto: the endpoint from --url, PROOFIX_LLM_*, ~/.config/proofix/config.toml, ADJUDICATE_LLM_* or ~/.config/adjudicate/config.toml, else local Ollama; ollama: local Ollama only; none: report instead of deciding (default: %(default)s)")
-    p.add_argument("--url", metavar="URL", help="OpenAI-compatible base URL ending in /v1")
+    p.add_argument("--llm", choices=["auto", "ollama", "none"], default="auto", help="auto: the endpoint from --url, PROOFIX_LLM_*, ~/.config/proofix/config.toml, ADJUDICATE_LLM_* or ~/.config/adjudicate/config.toml, else local Ollama; ollama: local Ollama only; none: no model, so tier 2's fixes are listed for review, tier 3 is skipped and commas are not checked (default: %(default)s)")
+    p.add_argument("--url", metavar="URL",
+                   help="OpenAI-compatible base URL ending in /v1; overrides every configured "
+                        "url. A --url or PROOFIX_LLM_URL drops keys set in lower layers; set "
+                        "PROOFIX_LLM_KEY (or api_key_env in the same config file) alongside it")
     p.add_argument("--model", metavar="NAME")
     p.add_argument("--min-confidence", type=float, default=0.8, metavar="X")
     p.add_argument("--parallel", type=int, default=4, metavar="N")
-    p.add_argument("--timeout", type=float, default=None, metavar="SEC", help="seconds per model request (default: 120, or timeout in config.toml)")
+    p.add_argument("--timeout", type=positive_seconds, default=None, metavar="SEC", help="seconds per model request (default: 120, or timeout in config.toml)")
     c = p.add_argument_group("configuration", "set up or check the model endpoint, then exit")
     c.add_argument("--setup", action="store_true",
                    help="choose a model endpoint interactively, test it, and save it to "
@@ -178,7 +206,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"proofix: {e}", file=sys.stderr)
         return 2
     if ep is None and args.llm == "auto":
-        print("proofix: no model endpoint found; tiers 2 and 3 will be reported, not applied. "
+        print("proofix: no model endpoint found; adjudicated fixes (tier 2) will be listed for "
+              "review, not applied, compounds (tier 3) skipped and commas (tier 4) not checked. "
               "Run `proofix --setup` to configure one.", file=sys.stderr)
 
     original = text
@@ -195,8 +224,8 @@ def main(argv: list[str] | None = None) -> int:
     review = []
     lt = find_languagetool() if not args.no_lt else None
     if not args.no_lt and not lt:
-        print("proofix: languagetool not found; skipping tiers 1 and 2 (brew install languagetool)",
-              file=sys.stderr)
+        print("proofix: languagetool not found; skipping its tier 1 fixes and tier 2 "
+              "(brew install languagetool)", file=sys.stderr)
     # Pass 1: mechanical faults (typos, whitespace, doubled punctuation), applied.
     if lt:
         try:

@@ -15,9 +15,9 @@ bounded, logged, reasoned edit; the model never rewrites prose. Run it
 after
 .BR stylefix (1).
 .PP
-Five tiers:
+Five tiers, numbered as in \-\-help and the README:
 .TP
-.B hygiene
+.B 0 hygiene
 Text that renders fine but is not what it looks like. HTML entities that
 Markdown can carry as plain characters (&#32; is a space, &quot; a quote,
 &mdash; a dash) are decoded; entities that would change Markdown's parsing
@@ -26,17 +26,17 @@ Zero-width spaces, byte-order marks, soft hyphens and control characters
 are removed. Windows line endings and decomposed accents are normalised
 first. Every change is logged.
 .TP
-.B mechanical
+.B 1 mechanical
 A space before a comma or period, a missing space after one, doubled
 punctuation, doubled words, known misspellings. Found by LanguageTool's
 single-answer rules and the typos tool; applied outright.
 .TP
-.B adjudicated
+.B 2 adjudicated
 Unknown words and grammar rules with candidate fixes. LanguageTool
-proposes; a local model picks one or KEEP from the sentence and the rule's
+proposes; a language model picks one or KEEP from the sentence and the rule's
 message.
 .TP
-.B compounds and consistency
+.B 3 compounds and consistency
 How a compound is written: closed, hyphenated or open ("cyberattack",
 "non-profit", "long term"), and terms the document capitalises two ways.
 Candidates come from the dictionaries: an open or hyphenated pair whose
@@ -47,7 +47,7 @@ UK) and that a compound modifier before a noun is hyphenated while a noun
 phrase is open, so "a third party" survives and "third party assessors"
 does not.
 .TP
-.B commas
+.B 4 commas
 Comma placement, which no rule engine detects. The model returns the
 sentence with commas corrected; a diff guard admits only insertions and
 deletions of commas and rejects anything else. Comma splices and other
@@ -69,11 +69,11 @@ Overwrite the input.
 Variety the document is written in. Default us.
 .TP
 .BI \-\-accept " FILE"
-Extra words never flagged as misspelled. ~/.config/proofix/accept.txt and
-stylefix's accept lists are also honoured.
+Extra words never flagged as misspelled. ~/.config/proofix/accept.txt,
+\&./.proofix/accept.txt and stylefix's accept lists are also honoured.
 .TP
 .B \-\-no\-lt
-Skip LanguageTool (the first two tiers).
+Skip LanguageTool: its tier 1 fixes (typos still runs) and all of tier 2.
 .TP
 .BR \-\-lt\-level " {default|picky}"
 LanguageTool rule level.
@@ -106,12 +106,33 @@ Cap on sentences sent to the comma tier.
 Commas that are optional by convention: leave as written (default) or
 add.
 .TP
-.BR \-\-llm " {auto|ollama|none}" ", " \-\-url ", " \-\-model ", " \-\-timeout
-Model endpoint, configured as in stylefix but from
-.BR PROOFIX_LLM_* " and " ~/.config/proofix/config.toml ,
-then the shared
-.BR ADJUDICATE_LLM_* " and " ~/.config/adjudicate/config.toml .
-With none, tiers two and three are reported, not applied.
+.BR \-\-llm " {auto|ollama|none}"
+.B auto
+(default) uses the endpoint from, highest first, the flags below,
+.BR PROOFIX_LLM_* ,
+.IR ~/.config/proofix/config.toml ,
+.B ADJUDICATE_LLM_*
+and
+.IR ~/.config/adjudicate/config.toml ,
+or else a local Ollama with a model pulled, or else no model.
+.B ollama
+uses the local Ollama server only, ignoring configured endpoints.
+.B none
+uses no model: tier 2's fixes are listed for review, not applied, tier 3
+is skipped and sentences are not checked for commas; tiers 0 and 1 still
+apply.
+.TP
+.BI \-\-url " URL"
+Any OpenAI-compatible base URL ending in /v1. Overrides every configured url.
+A \-\-url or PROOFIX_LLM_URL drops keys set in lower layers; set
+PROOFIX_LLM_KEY (or \fBapi_key_env\fR in the same config file) alongside it.
+.TP
+.BI \-\-model " NAME"
+Model name at the endpoint. If no layer sets one, the server's first listed model.
+.TP
+.BI \-\-timeout " SEC"
+Seconds per model request, a positive number. Default 120, or
+\fBtimeout\fR in config.toml.
 .TP
 .BI \-\-min\-confidence " X"
 Decisions below this are not applied. Default 0.8.
@@ -147,7 +168,8 @@ Needs a terminal. Ends by running the check below.
 .B \-\-check\-endpoint
 Print the endpoint proofix would use, one line per setting with the layer
 it came from (a key is never shown), then list the server's models and
-send one small request.
+send one small request. Honours
+.BR \-\-llm ", " \-\-url ", " \-\-model " and " \-\-timeout .
 .TP
 .BR \-v ", " \-\-verbose
 Report model batches on standard error.
@@ -209,3 +231,5 @@ standard input is not a terminal.
 .BR stylefix (1),
 .BR languagetool (1),
 .BR typos (1).
+.PP
+Full documentation: https://github.com/AndrewBroz/proofix

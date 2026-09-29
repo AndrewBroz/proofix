@@ -36,7 +36,10 @@ def test_no_endpoint_suggests_setup(tmp_path, capsys):
     src = tmp_path / "d.md"
     src.write_text("Some text.\n")
     assert cli.main([str(src), "--no-lt", "--no-typos", "--no-cache", "--dry-run"]) == 0
-    assert "proofix --setup" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "proofix --setup" in err
+    assert "tiers 2 and 3 will be reported" not in err
+    assert "listed for review" in err and "commas (tier 4) not checked" in err
 
 
 def test_check_endpoint_needs_no_input_file(capsys):
@@ -47,6 +50,8 @@ def test_check_endpoint_needs_no_input_file(capsys):
 def test_setup_needs_a_terminal(monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
     assert cli.main(["--setup"]) == 2
+    captured = capsys.readouterr()
+    assert "terminal" in captured.err and "terminal" not in captured.out
 
 
 def test_input_still_required_for_a_run(capsys):

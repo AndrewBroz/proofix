@@ -28,6 +28,11 @@ proofix = "proofix.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# Only what an sdist needs, so nothing ignored elsewhere can leak in.
+[tool.hatch.build.targets.sdist]
+only-include = ["proofix", "tests", "man", "examples", "LICENSE", "README.md", "pyproject.toml"]
+exclude = ["__pycache__", "*.pyc"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["proofix"]
 

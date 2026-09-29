@@ -16,7 +16,7 @@ Run it after [stylefix](https://github.com/AndrewBroz/stylefix), so the grammar 
 |---|---|---|---|
 | 0 hygiene | text that renders fine but is not what it looks like: HTML entities Markdown can carry plainly (`&#32;`, `&quot;`, `&mdash;`), zero-width spaces, byte-order marks, soft hyphens, control characters, Windows line endings, decomposed accents | fixed deterministically and logged; entities that would change Markdown's parsing (`&lt;`, `&gt;`, `&amp;`) or carry meaning (`&nbsp;`) are left alone and reported | applied outright, or noted |
 | 1 mechanical | space before a comma or period, missing space after one, doubled punctuation, doubled words, known misspellings | LanguageTool's single-answer rules, the `typos` tool, a small missing-space rule | applied outright |
-| 2 adjudicated | unknown words with candidate spellings, grammar rules with candidate fixes ("a comma may be missing after However") | LanguageTool proposes, a local model picks one or KEEP from the sentence and the rule's message | model |
+| 2 adjudicated | unknown words with candidate spellings, grammar rules with candidate fixes ("a comma may be missing after However") | LanguageTool proposes, a language model picks one or KEEP from the sentence and the rule's message | model |
 | 3 compounds and consistency | how a compound is written: "cyber attack" or "cyberattack", "non-profit" or "nonprofit", "long term" or "long-term"; and terms the document capitalises two ways | candidates found from the dictionaries (an open or hyphenated pair whose closed form is a word; a non-word that splits into two words; anything the document itself writes two ways). The model chooses closed, hyphenated, open or KEEP, told which dictionary rules (Merriam-Webster for US, Oxford for UK) and the rule that a compound modifier before a noun is hyphenated while a noun phrase is open | model |
 | 4 commas | a comma between subject and verb, a missing comma after an introductory phrase or around a non-restrictive clause, a stray comma before "and" joining objects: nothing a rule engine detects | the model returns the sentence with commas corrected; a diff guard admits only insertions and deletions of commas, rejects anything else, and reports it | model, under the guard |
 
@@ -56,8 +56,8 @@ Measured on a 20-page document (8,000 words, 390 sentences). One measurement, on
 | stylefix | 119 words | 43 s |
 | LanguageTool, one pass | nothing (local Java) | 4.5 s |
 | proofix tier 2 | 77 items | included below |
-| proofix tier 3, gated | 260 sentences | 19 s |
-| proofix tier 3, all | 390 sentences | 24 s |
+| proofix tier 4, gated | 260 sentences | 19 s |
+| proofix tier 4, all | 390 sentences | 24 s |
 | proofix, everything | | 57 s |
 
 Costs scale linearly with length: expect a 100-page document to take
@@ -73,8 +73,9 @@ uv tool install proofix       # or: pipx install proofix
 Optional, and worth having:
 
 - [LanguageTool](https://languagetool.org) on your PATH as `languagetool`
-  (`brew install languagetool`; it needs Java). Without it, tiers 1 and 2
-  are skipped with a warning and only hygiene and commas run.
+  (`brew install languagetool`; it needs Java). Without it, LanguageTool's
+  tier 1 fixes and all of tier 2 are skipped with a warning; hygiene, the
+  `typos` fixes, compounds and commas still run.
 - [typos](https://github.com/crate-ci/typos) (`brew install typos-cli` or
   `cargo install typos-cli`) for known-misspelling fixes in tier 1.
 
@@ -83,14 +84,18 @@ Run `proofix --setup` to choose and test a model endpoint, and
 is configured as for stylefix: `--url`/`--model`,
 `PROOFIX_LLM_URL`/`_MODEL`/`_KEY`, `~/.config/proofix/config.toml`, then
 the shared `ADJUDICATE_LLM_*` and `~/.config/adjudicate/config.toml`; with
-nothing configured, a local Ollama if one is running. See
+nothing configured, a local Ollama if one is running. A `--url` or
+`PROOFIX_LLM_URL` drops keys set in lower layers; set `PROOFIX_LLM_KEY` (or
+`api_key_env` in the same config file) alongside it. Without a model, tiers
+0 and 1 still apply; tier 2's fixes are listed for review, tier 3 is skipped
+and sentences are not checked for commas. See
 [adjudicate](https://github.com/AndrewBroz/adjudicate#choosing-the-model-endpoint)
 for the config table. `STYLEFIX_LLM_*` no longer configures proofix; use the
 shared file or `ADJUDICATE_LLM_*` to set both tools at once.
 
-Accept lists: `--accept FILE`, `~/.config/proofix/accept.txt`, and
-stylefix's `~/.config/stylefix/accept.txt` and `./.stylefix/accept.txt`
-are all honoured for spelling.
+Accept lists: `--accept FILE`, `~/.config/proofix/accept.txt`,
+`./.proofix/accept.txt`, and stylefix's `~/.config/stylefix/accept.txt` and
+`./.stylefix/accept.txt` are all honoured for spelling.
 
 ## Output
 
