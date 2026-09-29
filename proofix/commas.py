@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from adjudicate import Edit, Endpoint, LLMError, protected_spans, strip_thinking
+from adjudicate import FENCE, FRONT_MATTER, Edit, Endpoint, LLMError, protected_spans, strip_thinking
 
 VARIETY = {"us": "American English", "uk": "British English"}
 
@@ -93,12 +93,11 @@ class CommaResult:
 
 def _paragraphs(text: str):
     """(start, end) of paragraphs outside front matter and fenced code."""
-    from adjudicate.context import _FENCE, _FRONT   # noqa
     blocked = []
-    m = _FRONT.match(text)
+    m = FRONT_MATTER.match(text)
     if m:
         blocked.append((0, m.end()))
-    blocked += [m.span() for m in _FENCE.finditer(text)]
+    blocked += [m.span() for m in FENCE.finditer(text)]
     cursor = 0
     for bs, be in sorted(blocked):
         if bs > cursor:

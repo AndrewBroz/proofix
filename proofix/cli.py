@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from adjudicate import Cache, Edit, adjudicate, apply_edits, resolve_endpoint, system_prompt
+from adjudicate import Cache, ConfigError, Edit, adjudicate, apply_edits, check_endpoint, resolve_endpoint, run_setup, system_prompt
 
 from . import __version__, report
 from .commas import CommaCache, correct_commas
@@ -28,7 +28,7 @@ Three tiers, each bounded so every change is one logged, reasoned edit:
    words. Detected by LanguageTool (and, if installed, the `typos` tool for
    known misspellings).
 2. Faults with candidate fixes are adjudicated: LanguageTool proposes
-   spellings or grammar fixes, a local model picks one or KEEP from the
+   spellings or grammar fixes, a language model picks one or KEEP from the
    sentence and the rule's message.
 3. Comma placement, which no rule engine detects, is corrected sentence by
    sentence by the model under a diff guard: only insertions and deletions of
@@ -41,6 +41,7 @@ touched. Run it after stylefix so LanguageTool sees the target variety.
 
 EPILOG = """\
 examples:
+  proofix --setup                        # choose, test and save a model endpoint
   proofix draft.md                       # -> draft.proofed.md, US English
   proofix draft.md --target uk -o out.md
   proofix draft.md --changes             # list every change as it is made
@@ -50,6 +51,18 @@ examples:
 Requires languagetool on PATH for tiers 1 and 2 (brew install languagetool);
 tier 3 needs only a model. Accept lists: --accept, ~/.config/proofix/accept.txt,
 ~/.config/stylefix/accept.txt and ./.stylefix/accept.txt are all honoured.
+
+environment:
+  PROOFIX_LLM_URL, PROOFIX_LLM_MODEL, PROOFIX_LLM_KEY
+      the model endpoint for proofix (same as --url, --model, and the API key)
+  ADJUDICATE_LLM_URL, ADJUDICATE_LLM_MODEL, ADJUDICATE_LLM_KEY
+      the same, shared with stylefix; below the proofix variables and config
+  OLLAMA_HOST   Ollama base URL (default http://localhost:11434)
+
+files:
+  ~/.config/proofix/config.toml      [llm] url, model, api_key or api_key_env,
+                                     timeout, thinking_switch (proofix only)
+  ~/.config/adjudicate/config.toml   the same table, shared with stylefix
 """
 
 TASK = "You are a meticulous copy editor fixing typos and punctuation in a document written in {variety}."
@@ -59,7 +72,7 @@ VARIETY = {"us": "American English", "uk": "British English"}
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="proofix", description=DESCRIPTION, epilog=EPILOG,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("input", type=Path, help="Markdown file to proofread")
+    p.add_argument("input", type=Path, nargs="?", help="Markdown file to proofread")
     p.add_argument("-o", "--output", type=Path, metavar="FILE",
                    help="default: <input>.proofed.md")
     p.add_argument("-i", "--in-place", action="store_true", help="overwrite the input file")
@@ -91,12 +104,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--optional-commas", choices=["leave", "add"], default="leave",
                    help="what the comma tier does with commas that are optional by convention "
                         "(default: %(default)s)")
-    p.add_argument("--llm", choices=["auto", "dgx", "ollama", "none"], default="auto")
+    p.add_argument("--llm", choices=["auto", "ollama", "none"], default="auto", help="auto: the endpoint from --url, PROOFIX_LLM_*, ~/.config/proofix/config.toml, ADJUDICATE_LLM_* or ~/.config/adjudicate/config.toml, else local Ollama; ollama: local Ollama only; none: report instead of deciding (default: %(default)s)")
     p.add_argument("--url", metavar="URL", help="OpenAI-compatible base URL ending in /v1")
     p.add_argument("--model", metavar="NAME")
     p.add_argument("--min-confidence", type=float, default=0.8, metavar="X")
     p.add_argument("--parallel", type=int, default=4, metavar="N")
-    p.add_argument("--timeout", type=float, default=120.0, metavar="SEC")
+    p.add_argument("--timeout", type=float, default=None, metavar="SEC", help="seconds per model request (default: 120, or timeout in config.toml)")
+    c = p.add_argument_group("configuration", "set up or check the model endpoint, then exit")
+    c.add_argument("--setup", action="store_true",
+                   help="choose a model endpoint interactively, test it, and save it to "
+                        "~/.config/adjudicate/config.toml or ~/.config/proofix/config.toml")
+    c.add_argument("--check-endpoint", action="store_true",
+                   help="show the endpoint proofix would use and where each setting comes "
+                        "from, then test it; exit 0 if it answers, 1 if not, 2 on a config error")
     p.add_argument("--cache", type=Path, default=Path(".proofix/cache.json"), metavar="FILE")
     p.add_argument("--no-cache", action="store_true")
     p.add_argument("--report", type=Path, metavar="FILE", help="default: <output>.report.md")
@@ -134,7 +154,15 @@ def run_typos(text: str) -> list[Edit]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.setup:
+        return run_setup("proofix")
+    if args.check_endpoint:
+        return check_endpoint("proofix", preset=args.llm, url=args.url, model=args.model,
+                              timeout=args.timeout)
+    if args.input is None:
+        parser.error("the following arguments are required: input")
     if not args.input.exists():
         print(f"proofix: no such file: {args.input}", file=sys.stderr)
         return 2
@@ -143,7 +171,15 @@ def main(argv: list[str] | None = None) -> int:
     report_path = args.report or output.with_suffix(output.suffix + ".report.md")
     text = args.input.read_text(encoding="utf-8")
     accept = load_accept(args.accept)
-    ep = resolve_endpoint(args.llm, args.model, args.url, timeout=args.timeout)
+    try:
+        ep = resolve_endpoint("proofix", args.llm, url=args.url, model=args.model,
+                              timeout=args.timeout)
+    except ConfigError as e:
+        print(f"proofix: {e}", file=sys.stderr)
+        return 2
+    if ep is None and args.llm == "auto":
+        print("proofix: no model endpoint found; tiers 2 and 3 will be reported, not applied. "
+              "Run `proofix --setup` to configure one.", file=sys.stderr)
 
     original = text
     hygiene_notes: list[str] = []
