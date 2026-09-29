@@ -8,8 +8,7 @@ proofix draft.md                      # -> draft.proofed.md (US English)
 proofix draft.md --target uk --changes
 ```
 
-Run it after [stylefix](../stylefix), so the grammar checker sees the
-target variety, and before [mdmemo](../mdmemo) turns the file into a PDF.
+Run it after [stylefix](https://github.com/AndrewBroz/stylefix), so the grammar checker sees the target variety.
 
 ## Five tiers
 
@@ -50,8 +49,7 @@ Only the residue after the rule engines:
   it changed, so replies are short. `--commas all` sends every sentence;
   `--max-sentences N` caps the tier.
 
-Measured on a 20-page document (8,000 words, 390 sentences) against a
-DGX Spark serving Qwen3.8-27B, 8 requests in parallel:
+Measured on a 20-page document (8,000 words, 390 sentences). One measurement, on a DGX Spark serving Qwen3.8-27B, 8 requests in parallel:
 
 | stage | sent to the model | time |
 |---|---|---|
@@ -69,10 +67,26 @@ by sentence, so re-runs after edits pay only for what changed.
 ## Install
 
 ```
-brew install languagetool typos-cli      # Java for LanguageTool; typos optional
-uv tool install ~/Code/adjudicate
-uv tool install .
+uv tool install proofix       # or: pipx install proofix
 ```
+
+Optional, and worth having:
+
+- [LanguageTool](https://languagetool.org) on your PATH as `languagetool`
+  (`brew install languagetool`; it needs Java). Without it, tiers 1 and 2
+  are skipped with a warning and only hygiene and commas run.
+- [typos](https://github.com/crate-ci/typos) (`brew install typos-cli` or
+  `cargo install typos-cli`) for known-misspelling fixes in tier 1.
+
+Run `proofix --setup` to choose and test a model endpoint, and
+`proofix --check-endpoint` to see which one proofix will use. The endpoint
+is configured as for stylefix: `--url`/`--model`,
+`PROOFIX_LLM_URL`/`_MODEL`/`_KEY`, `~/.config/proofix/config.toml`, then
+the shared `ADJUDICATE_LLM_*` and `~/.config/adjudicate/config.toml`; with
+nothing configured, a local Ollama if one is running. See
+[adjudicate](https://github.com/AndrewBroz/adjudicate#choosing-the-model-endpoint)
+for the config table. `STYLEFIX_LLM_*` no longer configures proofix; use the
+shared file or `ADJUDICATE_LLM_*` to set both tools at once.
 
 Accept lists: `--accept FILE`, `~/.config/proofix/accept.txt`, and
 stylefix's `~/.config/stylefix/accept.txt` and `./.stylefix/accept.txt`
@@ -86,6 +100,10 @@ decided; the comma corrections with the model's reasons; comma suggestions
 the guard rejected, with what the model wanted; notes on faults the model
 noticed but is not allowed to fix (comma splices, agreement errors, a
 missing closing quote); and LanguageTool matches with no fix.
+
+## License
+
+MIT (see `LICENSE`).
 
 ## Development
 

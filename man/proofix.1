@@ -1,18 +1,19 @@
-.TH PROOFIX 1 "September 2026" "proofix 0.4.0" "User Commands"
+.TH PROOFIX 1 "September 2026" "proofix 0.5.0" "User Commands"
 .SH NAME
 proofix \- fix typos and punctuation in Markdown, under audit
 .SH SYNOPSIS
 .B proofix
 .I input.md
 .RI [ options ]
+.br
+.B proofix
+.RB [ \-\-setup " | " \-\-check\-endpoint ]
 .SH DESCRIPTION
 .B proofix
 corrects typos and punctuation in a Markdown file. Every change is one
 bounded, logged, reasoned edit; the model never rewrites prose. Run it
 after
-.BR stylefix (1)
-and before
-.BR mdmemo (1).
+.BR stylefix (1).
 .PP
 Five tiers:
 .TP
@@ -94,6 +95,10 @@ Which sentences the comma tier sends to the model. gated (default): those
 with a comma, an introductory opener, a clause trigger, or clauses joined
 by a conjunction. all: every sentence. none: skip the tier.
 .TP
+.B \-\-no\-commas
+Same as
+.BR "\-\-commas none" .
+.TP
 .BI \-\-max\-sentences " N"
 Cap on sentences sent to the comma tier.
 .TP
@@ -101,9 +106,12 @@ Cap on sentences sent to the comma tier.
 Commas that are optional by convention: leave as written (default) or
 add.
 .TP
-.BR \-\-llm " {auto|dgx|ollama|none}" ", " \-\-url ", " \-\-model ", " \-\-timeout
-Model endpoint, as in stylefix. With none, tiers two and three are
-reported, not applied.
+.BR \-\-llm " {auto|ollama|none}" ", " \-\-url ", " \-\-model ", " \-\-timeout
+Model endpoint, configured as in stylefix but from
+.BR PROOFIX_LLM_* " and " ~/.config/proofix/config.toml ,
+then the shared
+.BR ADJUDICATE_LLM_* " and " ~/.config/adjudicate/config.toml .
+With none, tiers two and three are reported, not applied.
 .TP
 .BI \-\-min\-confidence " X"
 Decisions below this are not applied. Default 0.8.
@@ -122,13 +130,82 @@ Print a diff, write nothing.
 .TP
 .B \-\-changes
 Print every change to standard error as it is made.
+.TP
+.B \-\-setup
+Ask where the model is (local Ollama, a hosted OpenAI-compatible API, or a
+self-hosted server), test it, and save the answer as the
+.B [llm]
+table of
+.I ~/.config/adjudicate/config.toml
+(shared with stylefix) or
+.IR ~/.config/proofix/config.toml .
+An existing table is shown and replaced only on confirmation, after a
+backup to
+.IR config.toml.bak .
+Needs a terminal. Ends by running the check below.
+.TP
+.B \-\-check\-endpoint
+Print the endpoint proofix would use, one line per setting with the layer
+it came from (a key is never shown), then list the server's models and
+send one small request.
+.TP
+.BR \-v ", " \-\-verbose
+Report model batches on standard error.
+.TP
+.B \-\-version
+Print the version and exit.
+.TP
+.BR \-h ", " \-\-help
+Print the usage summary and exit.
 .SH PERFORMANCE
 On a 20-page document (8,000 words) with a local 27B model and 8 parallel
 requests: LanguageTool 4.5 s per pass; the comma tier 19 s for the 260
 sentences that pass the gate; about a minute in all. Linear in length.
 Decisions are cached by sentence.
+.SH ENVIRONMENT
+.TP
+.BR PROOFIX_LLM_URL ", " PROOFIX_LLM_MODEL ", " PROOFIX_LLM_KEY
+Endpoint, model and API key for proofix; below the flags, above the config
+files.
+.TP
+.BR ADJUDICATE_LLM_URL ", " ADJUDICATE_LLM_MODEL ", " ADJUDICATE_LLM_KEY
+The same, shared with stylefix; below
+.I ~/.config/proofix/config.toml
+and above
+.IR ~/.config/adjudicate/config.toml .
+.TP
+.B OLLAMA_HOST
+Ollama base URL. Default http://localhost:11434.
+.SH FILES
+.TP
+.I ~/.config/proofix/config.toml
+.TQ
+.I ~/.config/adjudicate/config.toml
+Table
+.B [llm]
+with keys
+.BR url ", " model ", " api_key " or " api_key_env ", " timeout ", " thinking_switch .
+The first applies to proofix only; the second is shared with stylefix.
+.TP
+.IR ~/.config/proofix/accept.txt ", " ~/.config/stylefix/accept.txt ", " .stylefix/accept.txt ", " .proofix/accept.txt
+Words never flagged as misspelled, one per line.
+.SH EXIT STATUS
+.TP
+.B 0
+Finished. For
+.BR \-\-check\-endpoint " and " \-\-setup :
+the endpoint answers.
+.TP
+.B 1
+.BR \-\-check\-endpoint " or " \-\-setup :
+no endpoint, or it does not answer; or setup was cancelled or declined.
+.TP
+.B 2
+Input file missing, LanguageTool failed, or an invalid endpoint
+configuration (the message names the file and key). For
+.BR \-\-setup :
+standard input is not a terminal.
 .SH SEE ALSO
 .BR stylefix (1),
-.BR mdmemo (1),
 .BR languagetool (1),
 .BR typos (1).
