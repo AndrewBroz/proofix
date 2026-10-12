@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from adjudicate import Annotation, Change, ReviewItem, Skipped, derive_changes
 from adjudicate import Cache, Edit, adjudicate, apply_edits, protected_spans, system_prompt
+from adjudicate.apply import to_offsets
 from adjudicate.core import Decision
 from adjudicate.llm import Endpoint
 
 from . import basics, consistency, hygiene
 from .commas import CommaCache, CommaResult, comma_edits, correct_commas
 from .lt import Match, find_languagetool, run_languagetool
-from .tiers import (Partition, _line_col, accepted_double, double_item, double_message, partition,
-                    typos_edits)
+from .tiers import (REPEAT, Partition, _line_col, accepted_double, double_item, double_message,
+                    double_route, partition, typos_edits)
 
 TASK = "You are a meticulous copy editor fixing typos and punctuation in a document written in {variety}."
 VARIETY = {"us": "American English", "uk": "British English"}
@@ -70,6 +71,16 @@ def _line_of(text: str, pos: int) -> int:
     return text.count("\n", 0, pos) + 1
 
 
+def _shifted(text: str, applied: list[Edit], pos: int) -> int:
+    """Where offset `pos` of `text` lands once `applied` (edits on `text`) are made."""
+    delta = 0
+    for e in applied:
+        s, t = to_offsets(text, e)
+        if t <= pos:
+            delta += len(e.replacement) - (t - s)
+    return pos + delta
+
+
 def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
         comma_cache: CommaCache) -> Result:
     """Proofread text; no I/O on the caller's files. Raises LTError if LanguageTool fails."""
@@ -104,14 +115,19 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     # basics stands in for LanguageTool's mechanical pass when that pass will not run.
     use_basics = "basics" not in skip and not (lt and "mechanical" not in skip)
     # Pass 1: mechanical faults (typos, whitespace, doubled punctuation), applied.
+    pass1_repeats: list[Match] = []
     if lt and "mechanical" not in skip:
         matches = run_languagetool(text, o.target, o.lt_level)
-        edits += partition(text, matches, accept, adjudicate_available=False).edits
+        p1 = partition(text, matches, accept, adjudicate_available=False)
+        edits += p1.edits
+        if "adjudicated" in skip:      # no pass 2 to route them: keep pass 1's repeat reviews
+            pass1_repeats = [m for m in p1.review if m.rule == REPEAT]
     if use_basics:
         spans = protected_spans(text)
         edits += basics.spacing_edits(text, spans)
         edits += [basics.double_edit(text, d) for d in basics.doubled_words(text, spans)
-                  if d.closed and not accepted_double(text, d, accept)]
+                  if double_route(d, asking) == "edit" and not accepted_double(text, d, accept)]
+    pre_text = text
     text, rejected = apply_edits(text, edits)
     applied = [e for e in edits if e not in rejected]
     # Pass 2: judgement calls on the cleaned text, so spans no longer collide.
@@ -119,24 +135,32 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     if lt and "adjudicated" not in skip:
         matches = run_languagetool(text, o.target, o.lt_level)
         part = partition(text, matches, accept, adjudicate_available=asking)
-        edits = [e for e in part.edits if e.source == "MISSING_SPACE"]   # anything pass 1 exposed
+        # anything pass 1 exposed, or a repeat pass 1 did not catch ("the  the")
+        edits = [e for e in part.edits if e.source in ("MISSING_SPACE", REPEAT)]
         review = part.review
     else:
         part = Partition([], [], [])
         edits = []
+        review = [replace(m, start=_shifted(pre_text, applied, m.start),
+                          end=_shifted(pre_text, applied, m.end)) for m in pass1_repeats]
     if use_basics:
         # Doubles outside the closed list: adjudicated with a model, else reviewed.
         # One LanguageTool already routed in pass 2 is not raised twice.
         seen = {(i.line, i.start) for i in part.items} | {_line_col(text, m.start) for m in review}
         next_id = max((i.id for i in part.items), default=0) + 1
-        for d in basics.doubled_words(text, protected_spans(text)):
-            if d.closed or accepted_double(text, d, accept) or _line_col(text, d.first_start) in seen:
+        spans = protected_spans(text)
+        for d in basics.doubled_words(text, spans):
+            route = double_route(d, asking)
+            if route == "edit" or accepted_double(text, d, accept) or _line_col(text, d.first_start) in seen:
                 continue
-            if asking:
+            if route == "item":
                 part.items.append(double_item(text, d, next_id))
                 next_id += 1
             else:      # listed with LanguageTool's review matches, so the CLI shows it too
                 review.append(Match(d.first_start, d.end, "basics", "", double_message(text, d), ""))
+        # A space before : ; ! ? with more text after it may be a key ("Press : to"): a person decides.
+        review += [Match(p, p + 1, "basics", "", f"space before '{mark}'", "")
+                   for p, mark in basics.spacing_notes(text, spans)]
     system = system_prompt(TASK.format(variety=VARIETY[o.target]))
     if part.items:
         decisions = adjudicate(ep, f"proofix|{o.target}", part.items, cache,

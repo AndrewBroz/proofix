@@ -178,3 +178,92 @@ def test_basics_review_reaches_the_cli_list(monkeypatch):
     r = run("I had had enough.\n")
     assert [(m.rule, m.message) for m in r.lt_review] == [("basics", "repeated word 'had had'")]
     assert [(i.kind, i.check) for i in r.review if "repeated word" in i.message] == [("alert", "basics")]
+
+
+# Fix round 1: spacing applies only provably-right cases; the rest are reviewed or left alone.
+
+@pytest.mark.parametrize("text", ["Rename it to .bashrc first\n", "Built on .NET today\n",
+                                  "Great :) see you\n", "ok ;)\n", "He said :-( and left\n",
+                                  "Smile :D now\n", "Use :P often\n", "hello :wave: there\n",
+                                  "Dots . . . trail\n", "Press : to enter command mode\n",
+                                  "Type ! to run a shell\n", "a ratio of a :b here\n",
+                                  "Use e.g. , this\n", "Item:Value\n", "Wow !!\n",
+                                  "key item:wave: pairs\n", "say ok ,\"quoted\"\n"])
+def test_spacing_leaves_non_prose_alone(monkeypatch, text):
+    monkeypatch.setenv("PATH", "/nonexistent")
+    assert run(text).text == text
+
+
+@pytest.mark.parametrize("text,fixed", [
+    ("Is it ready ?\n", "Is it ready?\n"), ("one word ,\nnext line\n", "one word,\nnext line\n"),
+    ("items x , y and z\n", "items x, y and z\n"), ("Made in the U.S.A .\n", "Made in the U.S.A.\n"),
+    ("The programme , which\n", "The programme, which\n"), ("analysis,design\n", "analysis, design\n"),
+    ("end of list :\n- a\n", "end of list:\n- a\n"), ("Stop !\n", "Stop!\n"),
+    ("(see this ,) and\n", "(see this,) and\n"), ("key item:value pairs\n", "key item: value pairs\n"),
+    ("Wait ,really?\n", "Wait, really?\n")])
+def test_spacing_fixes_provable_cases(monkeypatch, text, fixed):
+    monkeypatch.setenv("PATH", "/nonexistent")
+    assert run(text).text == fixed
+
+
+@pytest.mark.parametrize("text,mark", [("Press : to enter\n", ":"), ("Note : the thing\n", ":"),
+                                       ("Type ! to run\n", "!"), ("Press ? for help\n", "?"),
+                                       ("Press ; to repeat\n", ";")])
+def test_space_before_mark_mid_line_is_reviewed(monkeypatch, text, mark):
+    monkeypatch.setenv("PATH", "/nonexistent")
+    r = run(text)
+    assert r.text == text
+    assert f"space before '{mark}'" in [m.message for m in r.lt_review]
+
+
+def test_unicode_and_apostrophe_doubles(monkeypatch):
+    monkeypatch.setenv("PATH", "/nonexistent")
+    for text, msg in [("The café café was shut.\n", "repeated word 'café café'"),
+                      ("It's it's raining.\n", "repeated word 'It's it's'"),
+                      ("The über über plan.\n", "repeated word 'über über'")]:
+        r = run(text)
+        assert r.text == text and msg in [i.message for i in r.review]
+    assert run("The café café was shut.\n", ep=FakeEndpoint(choice=1)).text == "The café was shut.\n"
+
+
+def test_languagetool_repeat_basics_cannot_match_is_still_routed(monkeypatch):
+    text = "We saw 3rd 3rd place.\n"            # _DOUBLE takes letters only
+    off = text.index("3rd")
+    _replay(monkeypatch, json.dumps({"matches": [{
+        "message": "Possible typo: you repeated a word.", "replacements": [{"value": "3rd"}],
+        "offset": off, "length": 7, "context": {"text": text, "offset": off, "length": 7},
+        "rule": {"id": "ENGLISH_WORD_REPEAT_RULE", "category": {"id": "MISC"}}}]}))
+    r = run(text)
+    assert r.text == text
+    assert "repeated word '3rd 3rd'" in [i.message for i in r.review]
+    assert run(text, ep=FakeEndpoint(choice=1)).text == "We saw 3rd place.\n"
+
+
+def test_double_with_two_spaces(monkeypatch):
+    monkeypatch.setenv("PATH", "/nonexistent")
+    assert run("We saw the  the dog.\n").text == "We saw the dog.\n"
+
+
+def test_languagetool_repeat_with_two_spaces(monkeypatch):
+    text = "We saw the  the dog.\n"
+    off = text.index("the")
+    _replay(monkeypatch, json.dumps({"matches": [{
+        "message": "Possible typo: you repeated a word.", "replacements": [{"value": "the"}],
+        "offset": off, "length": 8, "context": {"text": text, "offset": off, "length": 8},
+        "rule": {"id": "ENGLISH_WORD_REPEAT_RULE", "category": {"id": "MISC"}}}]}))
+    assert run(text).text == "We saw the dog.\n"
+
+
+def test_capitalised_closed_pair_is_reviewed(monkeypatch):
+    monkeypatch.setenv("PATH", "/nonexistent")
+    for ep in (None, FakeEndpoint(choice=1)):
+        r = run("The The report is late.\n", ep=ep)
+        assert r.text == "The The report is late.\n"
+        assert "repeated word 'The The'" in [i.message for i in r.review]
+    assert run("We flew to Bora Bora.\n").review == []
+
+
+def test_repeat_review_kept_when_adjudicated_skipped(replay_lt_repeat):
+    r = run("How do you know that that is wrong?\n", skip=frozenset({"adjudicated"}))
+    assert r.text == "How do you know that that is wrong?\n"
+    assert "repeated word 'that that'" in [i.message for i in r.review]

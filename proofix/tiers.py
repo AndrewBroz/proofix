@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 
 from adjudicate import Edit, Item, protected_spans, sentence_context
 
-from .basics import DOUBLE_RULE, Double, double_edit, doubled_words
+from .basics import CLOSED_DOUBLES, DOUBLE_RULE, Double, double_edit, doubled_words
 from .lt import Match
 
 # Rules whose single replacement is mechanical and always right in prose.
@@ -80,11 +80,37 @@ def double_item(text: str, d: Double, item_id: int) -> Item:
 
 
 def double_message(text: str, d: Double) -> str:
-    return f"repeated word '{text[d.first_start:d.start]} {d.word}'"
+    return f"repeated word '{d.text}'"
 
 
 def accepted_double(text: str, d: Double, accept: set[str]) -> bool:
-    return f"{text[d.first_start:d.start]} {d.word}".lower() in accept
+    return d.text.lower() in accept
+
+
+def double_route(d: Double, adjudicate_available: bool) -> str:
+    """"edit" (closed list, provably a typo), "item" (a model decides, KEEP offered)
+    or "review". A capitalised closed-list pair ("The The") may be a name: reviewed."""
+    if d.capitalised:
+        return "review"
+    if d.closed:
+        return "edit"
+    return "item" if adjudicate_available else "review"
+
+
+def _repeat_double(text: str, m: Match) -> Double | None:
+    """A LanguageTool repeat basics' pattern did not match ("3rd 3rd"): routed as a
+    double that is not on the closed list, unless it spans a line (the structural
+    cases: a blank line, a list, quote, heading or table line) or is a capitalised
+    pair that is not on the closed list (a name)."""
+    original = text[m.start:m.end]
+    parts = original.split()
+    if "\n" in original or len(parts) != 2:
+        return None
+    first, second = parts
+    capitalised = first[:1].isupper() and second[:1].isupper()
+    if capitalised and first.lower() not in CLOSED_DOUBLES:
+        return None
+    return Double(m.start + len(first), m.end, second, False, first, capitalised)
 
 
 def partition(text: str, matches: list[Match], accept: set[str] | None = None,
@@ -105,15 +131,15 @@ def partition(text: str, matches: list[Match], accept: set[str] | None = None,
         if m.rule in SPELLING and ("British English" in m.message or "American English" in m.message):
             continue          # a variety difference, not a typo: stylefix's job
         if m.rule == REPEAT:
-            # Routed exactly as basics routes its doubles. A match basics would not
-            # call a double (across a blank line, into a list/quote/heading/table
-            # line, a capitalised pair) is left alone.
-            d = doubles.get((m.start, m.end))
+            # Routed exactly as basics routes its doubles; see _repeat_double for
+            # matches basics' pattern does not cover.
+            d = doubles.get((m.start, m.end)) or _repeat_double(text, m)
             if d is None or accepted_double(text, d, accept):
                 continue
-            if d.closed:
+            route = double_route(d, adjudicate_available)
+            if route == "edit":
                 edits.append(replace(double_edit(text, d), source=m.rule))
-            elif adjudicate_available:
+            elif route == "item":
                 items.append(double_item(text, d, next_id))
                 next_id += 1
             else:
