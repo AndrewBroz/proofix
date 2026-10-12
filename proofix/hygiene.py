@@ -91,6 +91,27 @@ def _becomes_markdown(text: str, start: int, end: int, decoded: str) -> bool:
     return decoded.isspace() and not after.strip()
 
 
+_BLOCK_START = re.compile(r"[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|>|[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$))")
+
+
+def _removal_becomes_markdown(text: str, pos: int) -> bool:
+    """Whether deleting the invisible character at `pos` would make Markdown of what is
+    around it: start a heading, list item or blockquote ("\u200b# not a heading",
+    "2020\u2060. A good year"), form a #tag or @mention, or join an emphasis marker."""
+    ls = text.rfind("\n", 0, pos) + 1
+    le = text.find("\n", pos)
+    line = text[ls:le if le >= 0 else len(text)]
+    col = pos - ls
+    joined = _INVISIBLE.sub("", line[:col]) + line[col + 1:]
+    if _BLOCK_START.match(joined) and not _BLOCK_START.match(_INVISIBLE.sub("", line[:col]) + "\u200b"
+                                                             + line[col + 1:]):
+        return True
+    nxt, prev = text[pos + 1:pos + 2], text[pos - 1:pos] if pos else ""
+    if nxt in ("#", "@") and text[pos + 2:pos + 3].isalnum():
+        return True
+    return bool(set(nxt + prev) & set("*_~"))
+
+
 def _line(text: str, pos: int) -> int:
     return text.count("\n", 0, pos) + 1
 
@@ -141,6 +162,11 @@ def plan(text: str) -> tuple[list[Edit], list[Note]]:
             continue                     # part of an emoji sequence, not stray
         if m.group(0) in (_ZWJ, "\u200c") and _joins_script(text, m.start()):
             continue                     # Persian, Hindi: part of the spelling
+        if not (m.group(0) == "\ufeff" and m.start() == 0) and _removal_becomes_markdown(text, m.start()):
+            name = NAMES.get(m.group(0), "invisible character")
+            notes.append(Note(_line(text, m.start()), name,
+                              f"left a {name}: removing it would change how Markdown reads the line."))
+            continue
         col = _col(text, m.start())
         edits.append(Edit(_line(text, m.start()), col, col, m.group(0), "", "hygiene"))
         notes.append(Note(_line(text, m.start()), NAMES.get(m.group(0), "invisible character"),

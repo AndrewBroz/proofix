@@ -151,6 +151,8 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     review_items: list[ReviewItem] = []
     lt_wanted = not {"mechanical", "adjudicated"} <= skip
     disabled = lt_disabled(o)
+    # what the server's overlap filtering must not hide: every rule tier 1 applies or routes
+    ensure = sorted(MECHANICAL) if lt_server is not None else None
     lt = find_languagetool() if lt_wanted else None
     lt_missing = lt_wanted and not lt
     if lt_missing:
@@ -165,7 +167,8 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     pass1_review: list[Match] = []
     lt_repeats: set[tuple[int, int]] = set()
     if lt and "mechanical" not in skip:
-        matches = run_languagetool(text, o.target, o.lt_level, disabled=disabled, server=lt_server)
+        matches = run_languagetool(text, o.target, o.lt_level, disabled=disabled, server=lt_server,
+                                   ensure=ensure)
         p1 = partition(text, matches, accept, adjudicate_available=False)
         edits += p1.edits
         lt_repeats = {(e.line, e.start) for e in p1.edits if e.source == REPEAT}
@@ -189,10 +192,12 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     # Pass 2: judgement calls on the cleaned text, so spans no longer collide.
     review_text = text
     if lt_pass2:
-        matches = run_languagetool(text, o.target, o.lt_level, disabled=disabled, server=lt_server)
+        matches = run_languagetool(text, o.target, o.lt_level, disabled=disabled, server=lt_server,
+                                   ensure=ensure)
         part = partition(text, matches, accept, adjudicate_available=asking)
-        # anything pass 1 exposed, or a repeat pass 1 did not catch ("the  the")
-        edits = [e for e in part.edits if e.source in ("MISSING_SPACE", REPEAT)]
+        # Pass 2's outright edits are audited like pass 1's: anything pass 1 exposed, a repeat
+        # pass 1 did not catch ("the  the"), or an edit that lost to an overlapping one there.
+        edits = list(part.edits)
         review = part.review
     else:
         part = Partition([], [], [])
@@ -260,8 +265,11 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
             else:
                 review.append(held)
     # A pass-1 edit that lost to an overlapping one (other than the repeats above).
-    review += _overlap_reviews(pre_text, applied, [e for e in rejected_p1 if e.source != REPEAT],
-                               text, routed)
+    # One a pass-2 edit covers is resolved by it: not listed.
+    covered = [to_offsets(text, e) for e in edits]
+    review += [m for m in _overlap_reviews(pre_text, applied,
+                                           [e for e in rejected_p1 if e.source != REPEAT], text, routed)
+               if not any(s < m.end and m.start < t for s, t in covered)]
     system = system_prompt(TASK.format(variety=VARIETY[o.target]))
     if part.items:
         decisions = adjudicate(ep, f"proofix|{o.target}", part.items, cache,

@@ -49,9 +49,11 @@ A missing space between sentences ("Node.Js" is a name) and punctuation
 opening a paragraph go to the model.
 .IP \(bu 2
 A typos correction is applied only when the word is all lower case, has
-one correction, and is not part of a word with a digit or underscore;
-"Teh", "TEH", "foo_bar_teh", "teh2" and "alle" (all? alley?) go to the
-model.
+one correction, is not part of a word with a digit or underscore, and is
+either a known short typo ("teh", "adn") or four letters or more and not a
+contraction missing its apostrophe ("youre", "whos"); "Teh", "TEH",
+"foo_bar_teh", "teh2", "alle" (all? alley?), "ein", "hed" and "youre" go to
+the model.
 .RE
 .IP
 "Go to the model" means an item with KEEP among its choices; without a

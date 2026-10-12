@@ -267,6 +267,28 @@ def partition(text: str, matches: list[Match], accept: set[str] | None = None,
     return Partition(edits, items, review)
 
 
+# Short typos (three letters or fewer) typos may fix outright. Chosen from typos' own data
+# (all 2- and 3-letter strings fed to typos 1.51: 247 known typos): one correction only;
+# rejected by LanguageTool's spell checkers for en-US, en-GB, de-DE, fr, es, it, pt-PT,
+# nl, sv, da and pl; an adjacent transposition or one-letter omission of an ordinary
+# word; no other common English word one transposition or insertion away, except where
+# that word is no plausible intent (teh/tech, hte/hate, adn/Dan, wih/wish). Left out:
+# jargon corrections (cmo, fpt, gti, jkd, slq, sxl, unx), dialect or loaded (wha, gya),
+# unclear (abl, bse, daa, ede, edn). "nd" is accepted by the Polish checker only, as the
+# abbreviation "nd."; kept by ruling.
+SAFE_SHORT_TYPOS = frozenset(
+    "teh hte adn wih nd ehr eyt fwe hda hpe hsa hsi hve ihs kow mch muc nly nwe nwo onl oru "
+    "oyu suh tey thm tke vey viw whn wht woh wrk wth wya ype yuo".split())
+# A typo that one apostrophe turns into a contraction ("youre", "whos", "dont") may be
+# the contraction, not typos' correction ("your", "whose"): never applied outright.
+CONTRACTIONS = frozenset(
+    "i'm i've i'd i'll you're you've you'd you'll he's he'd he'll she's she'd she'll it's "
+    "it'd we're we've we'd we'll they're they've they'd they'll who's who'd what's that's "
+    "there's here's let's don't doesn't didn't can't won't wouldn't shouldn't couldn't "
+    "isn't aren't wasn't weren't hasn't haven't hadn't ain't".split())
+_CONTRACTION_SHAPED = frozenset(c.replace("'", "") for c in CONTRACTIONS)
+
+
 def _typos(text: str, json_lines: str, spans: list[tuple[int, int]] | None,
            accept: set[str] | frozenset[str] | None) -> list[tuple[int, str, list[str], bool]]:
     """(offset, typo, corrections, outright) from `typos --format json` output, kept out of
@@ -274,7 +296,9 @@ def _typos(text: str, json_lines: str, spans: list[tuple[int, int]] | None,
     lower case (not a name, an acronym or a sentence-initial word whose case is a
     guess), not within a word containing a digit or underscore (an identifier), and
     typos offers exactly one correction (two, as for "alle" -> all/alley, mean the word
-    may be another language's or another word's)."""
+    may be another language's or another word's), and the typo is in SAFE_SHORT_TYPOS or
+    has four letters or more and is not contraction-shaped: short ones are often words
+    elsewhere ("ein", "ser", "som") or another word ("hed": head or he'd)."""
     import json
     spans = protected_spans(text) if spans is None else spans
     accept = {w.lower() for w in (accept or ())}
@@ -309,7 +333,9 @@ def _typos(text: str, json_lines: str, spans: list[tuple[int, int]] | None,
         token = line[a:b]
         corrections = list(d["corrections"])
         outright = (word.islower() and word.isalpha() and len(corrections) == 1
-                    and not any(ch.isdigit() or ch == "_" for ch in token))
+                    and not any(ch.isdigit() or ch == "_" for ch in token)
+                    and (word in SAFE_SHORT_TYPOS
+                         or (len(word) >= 4 and word not in _CONTRACTION_SHAPED)))
         out.append((pos, word, corrections, outright))
     return out
 

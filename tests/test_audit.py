@@ -43,7 +43,7 @@ def replay(monkeypatch, text, lang="en-US", fixture=None):
     monkeypatch.setenv("PATH", "/nonexistent")                     # no typos
     monkeypatch.setattr(api, "find_languagetool", lambda: "/replay/languagetool")
 
-    def run(t, target, level="default", disabled=None, timeout=600, server=None):
+    def run(t, target, level="default", disabled=None, timeout=600, server=None, ensure=None):
         calls.append(disabled)
         return [m for m in parse_matches(fixture, t) if m.rule not in (disabled or ())]
     monkeypatch.setattr(api, "run_languagetool", run)
@@ -163,15 +163,16 @@ def _lt(text, *ms):
         "rule": {"id": rule, "category": {"id": "PUNCTUATION"}}} for rule, off, orig, rep, msg in ms]})
 
 
-@pytest.mark.parametrize("skip", [{"commas"}, {"commas", "adjudicated"}])
-def test_rejected_outright_edit_is_reviewed(monkeypatch, skip):
+def test_rejected_outright_edit_is_reviewed(monkeypatch):
     text = "Ok,,, then.\n"
     replay(monkeypatch, text, fixture=_lt(text, ("DOUBLE_PUNCTUATION", 2, ",,", ",", "Two commas"),
                                           ("DOUBLE_PUNCTUATION", 3, ",,", ",", "Two commas")))
-    r = fix(text, skip=frozenset(skip))
+    r = fix(text, skip=frozenset({"commas", "adjudicated"}))         # no pass 2 to fix it
     assert r.text == "Ok,, then.\n"
     msgs = [i.message for i in reviewed(r, "DOUBLE_PUNCTUATION")]
     assert len(msgs) == 1 and "',,'" in msgs[0] and "overlap" in msgs[0]
+    r = fix(text)                                                      # pass 2 fixes it: no review
+    assert r.text == "Ok, then.\n" and not r.review
 
 
 # --- the variety filter -------------------------------------------------------------
@@ -324,3 +325,75 @@ def test_real_languagetool_honours_the_variety_filter():
     skip = frozenset({"commas", "typos"})
     assert not fix(text, target="uk", skip=skip).review
     assert reviewed(fix(text, target="uk", oxford_ize=True, skip=skip), "OXFORD_SPELLING_Z_NOT_S")
+
+
+# --- fix round 1 ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("typo, correction", [
+    ("youre", "your"), ("whos", "whose"), ("hed", "head"), ("ein", "in"), ("ser", "set"),
+    ("som", "some"), ("nam", "name"), ("seh", "she"), ("nto", "not"), ("dont", "do"),
+])
+def test_typos_short_or_contraction_shaped_held_back(typo, correction):
+    text = f"x {typo} y\n"
+    out = _typo(1, 2, typo, correction)
+    assert tiers.typos_edits(text, out) == []
+    assert [m.rule for m in tiers.typos_matches(text, out)] == ["typos"]
+
+
+@pytest.mark.parametrize("typo, correction", [
+    ("teh", "the"), ("hte", "the"), ("adn", "and"), ("wih", "with"), ("nd", "and"),
+    ("recieve", "receive"), ("seperate", "separate"), ("mesage", "message"), ("shoud", "should"),
+    ("thier", "their"), ("reccomend", "recommend"), ("occured", "occurred"), ("anual", "annual"),
+    ("ment", "meant"),          # four letters, not contraction-shaped: rule (a) applies it
+])
+def test_typos_safe_list_and_long_typos_applied(typo, correction):
+    text = f"x {typo} y\n"
+    assert [e.replacement for e in tiers.typos_edits(text, _typo(1, 2, typo, correction))] == [correction]
+
+
+def test_safe_short_typos_list():
+    assert {"teh", "hte", "adn", "wih", "nd"} <= tiers.SAFE_SHORT_TYPOS
+    assert not {"ein", "ser", "som", "nam", "seh", "nto", "hed"} & tiers.SAFE_SHORT_TYPOS
+    assert all(len(w) <= 3 and w.isalpha() and w.islower() for w in tiers.SAFE_SHORT_TYPOS)
+
+
+@needs_typos
+@pytest.mark.parametrize("text", ["Thanks, youre welcome.\n", "Wir sind ein Team.\n",
+                                  "He hit his hed on it.\n"])
+def test_real_typos_wrong_short_fixes_held_back(monkeypatch, text):
+    _no_lt(monkeypatch)
+    r = fix(text)
+    assert r.text == text and reviewed(r, "typos")
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("The report ,,and more.\n", "The report, and more.\n"),
+    ("He said ,, that it was.\n", "He said, that it was.\n"),
+])
+def test_pass_2_applies_audited_edits_pass_1_lost(monkeypatch, text, expected):
+    """Pass 1's overlapping edits lose to each other; pass 2's outright edits are kept,
+    and the overlap review they resolve is dropped."""
+    fixture = {"The report ,,and more.\n": _lt(text, ("COMMA_PARENTHESIS_WHITESPACE", 10, " ,", ", ", "sp"),
+                                                 ("DOUBLE_PUNCTUATION", 11, ",,", ",", "two")),
+               "He said ,, that it was.\n": _lt(text, ("COMMA_PARENTHESIS_WHITESPACE", 7, " ,", ",", "sp"),
+                                                 ("DOUBLE_PUNCTUATION", 8, ",,", ",", "two"))}[text]
+    replay(monkeypatch, text, fixture=fixture)
+    r = fix(text)
+    assert r.text == expected
+    assert not [i for i in r.review if "overlap" in i.message]
+
+
+@pytest.mark.parametrize("text", [
+    "​# not a heading\n", "2020⁠. A good year\n", "⁠- not a bullet\n",
+    "​> not a quote\n", "Use ​#tag literally\n", "Mail ​@someone here\n",
+    "a​*b* c\n", "**bold**​text\n",
+])
+def test_hygiene_keeps_invisible_characters_that_hold_off_markdown(text):
+    edits, notes = hygiene.plan(text)
+    assert edits == [] and notes
+
+
+def test_hygiene_still_removes_stray_invisible_characters():
+    for text in ("A wo​rd here.\n", "Soft­hyphen here.\n", "ten⁠km away\n"):
+        edits, _ = hygiene.plan(text)
+        assert len(edits) == 1, text

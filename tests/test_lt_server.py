@@ -92,3 +92,83 @@ def test_server_request_failure_raises_lterror():
         url = "http://127.0.0.1:9"
     with pytest.raises(LTError):
         run_languagetool("Some text.\n", "us", server=Gone())
+
+
+def test_interrupt_during_start_stops_the_server(monkeypatch):
+    started = []
+    real_popen = lt.subprocess.Popen
+
+    def popen(*a, **k):
+        p = real_popen(*a, **k)
+        started.append(p)
+        return p
+    monkeypatch.setattr(lt.subprocess, "Popen", popen)
+
+    def interrupted(*a, **k):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(lt.urllib.request, "urlopen", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        with LanguageToolServer():
+            pass
+    assert started and not _alive(started[0].pid)
+
+
+def test_http_exception_during_start_is_not_ready_yet(monkeypatch):
+    import http.client
+    real = lt.urllib.request.urlopen
+    calls = []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise http.client.BadStatusLine("x")
+        return real(*a, **k)
+    monkeypatch.setattr(lt.urllib.request, "urlopen", flaky)
+    with LanguageToolServer() as s:
+        pid = s.process.pid
+    assert len(calls) >= 2 and not _alive(pid)
+
+
+def test_early_exit_is_reported_with_its_code(monkeypatch, tmp_path):
+    script = tmp_path / "languagetool-server"
+    script.write_text("#!/bin/sh\nexit 3\n")
+    script.chmod(0o755)
+    monkeypatch.setattr(lt.shutil, "which", lambda name: str(script))
+    with pytest.raises(LTError, match="exited.*3"):
+        with LanguageToolServer():
+            pass
+
+
+
+
+def _parity(text, srv, ep_factory):
+    out = []
+    for server in (srv, None):
+        ep = ep_factory()
+        r = api.fix(text, api.Options(skip=frozenset({"commas", "typos", "compounds"})), ep,
+                    Cache(None), CommaCache(None), lt_server=server)
+        out.append((r.text, sorted((e.original, e.replacement, e.source) for e in r.applied),
+                    sorted((i.line, i.kind, i.check) for i in r.review),
+                    sorted((d.item.word, d.item.options) for d in r.decisions)))
+    return out
+
+
+@pytest.mark.parametrize("name", ["however", "typos.md"])
+@pytest.mark.parametrize("model", [False, True])
+def test_server_parity_with_command_line(srv, name, model):
+    import json as _json
+    from pathlib import Path
+    from adjudicate.llm import Endpoint
+
+    class First(Endpoint):
+        def __init__(self):
+            super().__init__(url="http://x/v1", model="m")
+
+        def chat(self, system, user, timeout=None, json_mode=True):
+            ids = [int(line.split()[1]) for line in user.splitlines() if line.startswith("Item ")]
+            return _json.dumps({"decisions": [{"id": i, "choice": 1, "confidence": 0.95, "reason": "t"}
+                                              for i in ids]})
+    text = ("It was clear.However the chair disagreed.\n" if name == "however" else
+            (Path(__file__).parent.parent / "examples" / "typos.md").read_text())
+    via_server, via_cli = _parity(text, srv, (First if model else (lambda: None)))
+    assert via_server == via_cli
