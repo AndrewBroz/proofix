@@ -112,21 +112,31 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     if lt_missing:
         skipped.append(Skipped("grammar and spelling fixes (tiers 1 and 2)", "LanguageTool not found",
                                "brew install languagetool"))
-    # basics stands in for LanguageTool's mechanical pass when that pass will not run.
-    use_basics = "basics" not in skip and not (lt and "mechanical" not in skip)
+    # basics' doubled words always run (LanguageTool misses "that that"), deduplicated
+    # against its repeat rule; basics' spacing stands in for LanguageTool's mechanical
+    # pass only when that pass will not run.
+    use_doubles = "basics" not in skip
+    use_spacing = use_doubles and not (lt and "mechanical" not in skip)
     # Pass 1: mechanical faults (typos, whitespace, doubled punctuation), applied.
     pass1_repeats: list[Match] = []
+    lt_repeats: set[tuple[int, int]] = set()
     if lt and "mechanical" not in skip:
         matches = run_languagetool(text, o.target, o.lt_level)
         p1 = partition(text, matches, accept, adjudicate_available=False)
         edits += p1.edits
+        lt_repeats = {(e.line, e.start) for e in p1.edits if e.source == REPEAT}
         if "adjudicated" in skip:      # no pass 2 to route them: keep pass 1's repeat reviews
             pass1_repeats = [m for m in p1.review if m.rule == REPEAT]
-    if use_basics:
+    if use_doubles:
         spans = protected_spans(text)
-        edits += basics.spacing_edits(text, spans)
-        edits += [basics.double_edit(text, d) for d in basics.doubled_words(text, spans)
-                  if double_route(d, asking) == "edit" and not accepted_double(text, d, accept)]
+        if use_spacing:
+            edits += basics.spacing_edits(text, spans)
+        for d in basics.doubled_words(text, spans):
+            if double_route(d, asking) != "edit" or accepted_double(text, d, accept):
+                continue
+            e = basics.double_edit(text, d)
+            if (e.line, e.start) not in lt_repeats:        # LanguageTool's edit is the one kept
+                edits.append(e)
     pre_text = text
     text, rejected = apply_edits(text, edits)
     applied = [e for e in edits if e not in rejected]
@@ -143,10 +153,11 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
         edits = []
         review = [replace(m, start=_shifted(pre_text, applied, m.start),
                           end=_shifted(pre_text, applied, m.end)) for m in pass1_repeats]
-    if use_basics:
+    if use_doubles:
         # Doubles outside the closed list: adjudicated with a model, else reviewed.
-        # One LanguageTool already routed in pass 2 is not raised twice.
-        seen = {(i.line, i.start) for i in part.items} | {_line_col(text, m.start) for m in review}
+        # One LanguageTool's repeat rule already routed is not raised twice.
+        seen = ({(i.line, i.start) for i in part.items if i.source == "repeat"}
+                | {_line_col(text, m.start) for m in review if m.rule in (REPEAT, "basics")})
         next_id = max((i.id for i in part.items), default=0) + 1
         spans = protected_spans(text)
         for d in basics.doubled_words(text, spans):
@@ -159,8 +170,9 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
             else:      # listed with LanguageTool's review matches, so the CLI shows it too
                 review.append(Match(d.first_start, d.end, "basics", "", double_message(text, d), ""))
         # A space before : ; ! ? with more text after it may be a key ("Press : to"): a person decides.
-        review += [Match(p, p + 1, "basics", "", f"space before '{mark}'", "")
-                   for p, mark in basics.spacing_notes(text, spans)]
+        if use_spacing:
+            review += [Match(p, p + 1, "basics", "", f"space before '{mark}'", "")
+                       for p, mark in basics.spacing_notes(text, spans)]
     system = system_prompt(TASK.format(variety=VARIETY[o.target]))
     if part.items:
         decisions = adjudicate(ep, f"proofix|{o.target}", part.items, cache,

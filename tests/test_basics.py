@@ -105,7 +105,10 @@ def test_basics_does_not_run_with_languagetool(monkeypatch):
     monkeypatch.setattr(api, "find_languagetool", lambda: "/replay/languagetool")
     monkeypatch.setattr(api, "run_languagetool", lambda *a, **k: [])     # LanguageTool "runs", finds nothing
     r = run("The the end , ok.\n")
-    assert not [e for e in r.applied if e.source == "basics"]
+    # Fix round 2 ruling: doubled words run alongside LanguageTool; spacing does not.
+    assert not [e for e in r.applied if e.source == "basics" and "the" not in e.original.lower()]
+    assert r.text.startswith("The end , ok.")
+    assert len([e for e in r.applied if e.original == "The the"]) == 1
 
 
 def test_languagetool_repeat_outside_closed_list_is_reviewed(replay_lt_repeat):
@@ -267,3 +270,57 @@ def test_repeat_review_kept_when_adjudicated_skipped(replay_lt_repeat):
     r = run("How do you know that that is wrong?\n", skip=frozenset({"adjudicated"}))
     assert r.text == "How do you know that that is wrong?\n"
     assert "repeated word 'that that'" in [i.message for i in r.review]
+
+
+# Fix round 2: doubled_words runs alongside real LanguageTool, which misses "that that".
+
+needs_lt = pytest.mark.skipif(api.find_languagetool() is None, reason="languagetool not installed")
+
+
+def _repeat_reviews(r):
+    return [i for i in r.review if "repeated word" in i.message]
+
+
+@needs_lt
+def test_real_lt_that_that_is_reviewed():
+    r = run("How do you know that that is wrong?\n", skip=frozenset({"typos"}))
+    assert r.text == "How do you know that that is wrong?\n"
+    assert [i.message for i in _repeat_reviews(r)] == ["repeated word 'that that'"]
+
+
+@needs_lt
+def test_real_lt_closed_double_one_edit():
+    r = run("We got the the scheme.\n", skip=frozenset({"typos"}))
+    assert r.text == "We got the scheme.\n"
+    assert len([e for e in r.applied if "the the" in e.original]) == 1
+    assert _repeat_reviews(r) == []
+
+
+@needs_lt
+def test_real_lt_very_very_one_review():
+    r = run("It was very very good.\n", skip=frozenset({"typos"}))
+    assert r.text == "It was very very good.\n"
+    assert len(_repeat_reviews(r)) == 1
+
+
+@needs_lt
+def test_real_lt_that_that_adjudicated_once():
+    ep = FakeEndpoint(choice=1)
+    r = run("How do you know that that is wrong?\n", ep=ep, skip=frozenset({"typos"}))
+    assert r.text == "How do you know that is wrong?\n"
+    assert len([d for d in r.decisions if d.item.source == "repeat"]) == 1
+
+
+def test_doubles_dedup_against_replayed_lt(replay_lt_repeat):
+    r = run("How do you know that that is wrong?\n")
+    assert len(_repeat_reviews(r)) == 1
+
+
+def test_skip_basics_with_lt_no_double_routing(monkeypatch):
+    monkeypatch.setattr(api, "find_languagetool", lambda: "/replay/languagetool")
+    monkeypatch.setattr(api, "run_languagetool", lambda *a, **k: [])
+    r = run("How do you know that that is wrong?\n", skip=frozenset({"basics", "typos"}))
+    assert _repeat_reviews(r) == []
+    r = run("How do you know that that is wrong?\n", skip=frozenset({"typos"}))
+    assert len(_repeat_reviews(r)) == 1
+    assert run("The end , ok.\n", skip=frozenset({"typos"})).text == "The end , ok.\n"   # no spacing with LT
