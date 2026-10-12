@@ -6,18 +6,14 @@ import argparse
 import difflib
 import math
 import os
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
-from adjudicate import Cache, ConfigError, Edit, adjudicate, apply_edits, check_endpoint, resolve_endpoint, run_setup, system_prompt
+from adjudicate import Cache, ConfigError, check_endpoint, resolve_endpoint, run_setup
 
-from . import __version__, report
-from .commas import CommaCache, correct_commas
-from .lt import LTError, find_languagetool, run_languagetool
-from . import consistency, hygiene
-from .tiers import partition, typos_edits
+from . import __version__, api, report
+from .commas import CommaCache
+from .lt import LTError
 
 DESCRIPTION = """\
 Fix typos and punctuation in a Markdown file, under audit.
@@ -77,10 +73,6 @@ files:
 Full documentation: https://github.com/AndrewBroz/proofix (man page:
 man/proofix.1 in the source)
 """
-
-TASK = "You are a meticulous copy editor fixing typos and punctuation in a document written in {variety}."
-VARIETY = {"us": "American English", "uk": "British English"}
-
 
 def positive_seconds(text: str) -> float:
     """argparse type for --timeout: a positive, finite number of seconds."""
@@ -172,15 +164,6 @@ def load_accept(explicit: Path | None) -> set[str]:
     return words
 
 
-def run_typos(text: str) -> list[Edit]:
-    """Known-misspelling fixes from the `typos` tool, as edits, if installed."""
-    exe = shutil.which("typos")
-    if not exe:
-        return []
-    proc = subprocess.run([exe, "--format", "json", "-"], input=text, capture_output=True, text=True)
-    return typos_edits(text, proc.stdout)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -210,100 +193,27 @@ def main(argv: list[str] | None = None) -> int:
               "review, not applied, compounds (tier 3) skipped and commas (tier 4) not checked. "
               "Run `proofix --setup` to configure one.", file=sys.stderr)
 
-    original = text
-    hygiene_notes: list[str] = []
-    edits: list[Edit] = []
-    if not args.no_hygiene:
-        text, hygiene_notes = hygiene.normalize_text(text)
-        h_edits, h_notes = hygiene.plan(text)
-        edits += h_edits
-        hygiene_notes += [f"L{n.line} {n.message}" for n in h_notes]
-    edits += [] if args.no_typos else run_typos(text)
-    typos_fixed = sum(1 for e in edits if e.source == "typos")
-    decisions = []
-    review = []
-    lt = find_languagetool() if not args.no_lt else None
-    if not args.no_lt and not lt:
+    skip = {t for t, flag in (("hygiene", args.no_hygiene), ("typos", args.no_typos),
+                              ("compounds", args.no_consistency)) if flag}
+    skip |= {"mechanical", "adjudicated"} if args.no_lt else set()
+    skip |= {"commas"} if args.no_commas else set()
+    options = api.Options(target=args.target, accept=frozenset(accept), lt_level=args.lt_level,
+                          style=args.style, commas=args.commas, optional_commas=args.optional_commas,
+                          max_sentences=args.max_sentences, min_confidence=args.min_confidence,
+                          parallel=args.parallel, verbose=args.verbose, skip=frozenset(skip))
+    cache = Cache(None if args.no_cache else args.cache)
+    comma_cache = CommaCache(None if args.no_cache else args.cache.with_name("commas.json"))
+    try:
+        r = api.fix(text, options, ep, cache, comma_cache)
+    except LTError as e:
+        print(f"proofix: {e}", file=sys.stderr)
+        return 2
+    if r.lt_missing:
         print("proofix: languagetool not found; skipping its tier 1 fixes and tier 2 "
               "(brew install languagetool)", file=sys.stderr)
-    # Pass 1: mechanical faults (typos, whitespace, doubled punctuation), applied.
-    if lt:
-        try:
-            matches = run_languagetool(text, args.target, args.lt_level)
-        except LTError as e:
-            print(f"proofix: {e}", file=sys.stderr)
-            return 2
-        edits += partition(text, matches, accept, adjudicate_available=False).edits
-    text, skipped = apply_edits(text, edits)
-    applied = [e for e in edits if e not in skipped]
-    # Pass 2: judgement calls on the cleaned text, so spans no longer collide.
-    if lt:
-        try:
-            matches = run_languagetool(text, args.target, args.lt_level)
-        except LTError as e:
-            print(f"proofix: {e}", file=sys.stderr)
-            return 2
-        part = partition(text, matches, accept, adjudicate_available=ep is not None)
-        edits = [e for e in part.edits if e.source == "MISSING_SPACE"]   # anything pass 1 exposed
-        review = part.review
-    else:
-        from .tiers import Partition
-        part = Partition([], [], [])
-        edits = []
-    if True:
-        if True:
-            if part.items:
-                cache = Cache(None if args.no_cache else args.cache)
-                decisions = adjudicate(ep, f"proofix|{args.target}", part.items, cache,
-                                       parallel=args.parallel, verbose=args.verbose,
-                                       system=system_prompt(TASK.format(variety=VARIETY[args.target])),
-                                       log_name="proofix")
-                for d in decisions:
-                    if d.choice is not None and d.confidence < args.min_confidence:
-                        d.reason, d.choice = f"low confidence ({d.confidence:.2f}): {d.reason}", None
-                    if d.replacement:
-                        edits.append(Edit(d.item.line, d.item.start, d.item.end, d.item.word,
-                                          d.replacement, "adjudicated"))
-        new_text, skipped = apply_edits(text, edits)
-        applied += [e for e in edits if e not in skipped]
-        text = new_text
-    # Pass 3: compounds and consistency, on the text as it now stands.
-    if not args.no_consistency and ep is not None:
-        c_items, groups = consistency.items(text, args.target, args.style)
-        if c_items:
-            cache = Cache(None if args.no_cache else args.cache)
-            c_decisions = adjudicate(ep, f"proofix|{args.target}", c_items, cache,
-                                     parallel=args.parallel, verbose=args.verbose,
-                                     system=system_prompt(TASK.format(variety=VARIETY[args.target])),
-                                     log_name="proofix")
-            c_edits = []
-            for d in c_decisions:
-                if d.choice is not None and d.confidence < args.min_confidence:
-                    d.reason, d.choice = f"low confidence ({d.confidence:.2f}): {d.reason}", None
-                if not d.replacement:
-                    continue
-                for o in groups[d.item.id]:
-                    line = text.count("\n", 0, o.start) + 1
-                    col = o.start - (text.rfind("\n", 0, o.start) + 1) + 1
-                    c_edits.append(Edit(line, col, col + (o.end - o.start) - 1, o.form,
-                                        consistency._recase(o.form, d.replacement.lower()), "adjudicated"))
-            decisions += c_decisions
-            new_text, skipped = apply_edits(text, c_edits)
-            applied += [e for e in c_edits if e not in skipped]
-            text = new_text
-    new_text = text
-
-    comma_results = []
-    if not args.no_commas and args.commas != "none":
-        ccache = CommaCache(None if args.no_cache else args.cache.with_name("commas.json"))
-        cedits, comma_results = correct_commas(new_text, args.target, ep, ccache,
-                                               args.optional_commas, args.min_confidence,
-                                               parallel=args.parallel, verbose=args.verbose,
-                                               gate=args.commas == "gated",
-                                               max_sentences=args.max_sentences)
-        final, cskipped = apply_edits(new_text, cedits)
-        applied += [e for e in cedits if e not in cskipped]
-        new_text = final
+    original, new_text = text, r.text
+    applied, decisions, comma_results = r.applied, r.decisions, r.comma_results
+    review, typos_fixed, hygiene_notes = r.lt_review, r.typos_fixed, r.hygiene_notes
 
     if args.dry_run:
         sys.stdout.writelines(difflib.unified_diff(

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from proofix import cli, lt
+from proofix import api, cli, lt
 from proofix.lt import parse_matches
 
 FIX = Path(__file__).parent / "fixtures" / "typos.lt.json"
@@ -71,8 +71,8 @@ def replay_lt(monkeypatch):
     """First call replays the fixture; the second (on cleaned text) replays only
     the matches whose context still exists, as parse_matches's search does."""
     fixture = FIX.read_text()
-    monkeypatch.setattr(cli, "find_languagetool", lambda: "/replay/languagetool")
-    monkeypatch.setattr(cli, "run_languagetool", lambda text, target, level="default": parse_matches(fixture, text))
+    monkeypatch.setattr(api, "find_languagetool", lambda: "/replay/languagetool")
+    monkeypatch.setattr(api, "run_languagetool", lambda text, target, level="default": parse_matches(fixture, text))
 
 
 def test_end_to_end(tmp_path, replay_lt, stub_url, capsys):
