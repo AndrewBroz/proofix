@@ -191,7 +191,7 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
         if r.status in ("rejected", "note"):
             review_items.append(ReviewItem(_line_of(before_commas, r.sentence.start),
                                            r.status, r.reason, "commas", "proofix"))
-        elif r.status == "error":
+        elif r.status == "error" and r.reason != "no model configured":   # reported once, as a skipped capability
             review_items.append(ReviewItem(_line_of(before_commas, r.sentence.start),
                                            "note", r.reason, "commas", "proofix"))
     return Result(new_text, changes, review_items, skipped, applied, decisions, comma_results,

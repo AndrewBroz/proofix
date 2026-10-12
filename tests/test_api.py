@@ -69,3 +69,9 @@ def test_model_decided_compound_is_labelled_model(monkeypatch):
     assert apply_changes(TYPOS, r.changes) == r.text
     third = [c for c in r.changes if c.after == "-" and c.decided_by == "model"]
     assert third and third[0].check == "adjudicated" and third[0].reason == "model says so"
+
+
+def test_no_endpoint_is_not_a_review_item_per_sentence(monkeypatch):
+    monkeypatch.setenv("PATH", "/nonexistent")
+    r = run(TYPOS)
+    assert not [i for i in r.review if "no model configured" in i.message]
