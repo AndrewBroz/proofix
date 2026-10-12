@@ -1,4 +1,4 @@
-.TH PROOFIX 1 "October 2026" "proofix 0.6.0" "User Commands"
+.TH PROOFIX 1 "October 2026" "proofix 0.7.0" "User Commands"
 .SH NAME
 proofix \- fix typos and punctuation in Markdown, under audit
 .SH SYNOPSIS
@@ -29,11 +29,45 @@ first. Every change is logged.
 .B 1 mechanical
 A space before a comma or period, a missing space after one, doubled
 punctuation, doubled words whose repeat is never grammatical ("the the",
-"of of"), known misspellings. Found by LanguageTool's single-answer rules
-and the typos tool; applied outright. Without LanguageTool, the built-in
-basics check fixes the spacing and doubled words. Other doubles ("that
-that", "had had", "very very") go to the model with KEEP, or are listed for
-review without one.
+"of of"), known misspellings. Found by LanguageTool and the typos tool.
+An edit is applied outright only where it is right in every context;
+the audit of these rules found:
+.RS
+.IP \(bu 2
+A space before a comma or period is removed where the basics check below
+agrees, and a space just inside a bracket beside a letter or digit;
+".bashrc", ". . ." and "1 ,000" go to the model.
+.IP \(bu 2
+Doubled punctuation with one answer (",,") is fixed; ".." ("." or "\[u2026]",
+or a path, as in "cd ..") goes to the model.
+.IP \(bu 2
+A run of spaces mid-line is collapsed; indentation, a table row, an
+indented code line and trailing spaces (a Markdown hard line break) are left
+alone.
+.IP \(bu 2
+A missing space between sentences ("Node.Js" is a name) and punctuation
+opening a paragraph go to the model.
+.IP \(bu 2
+A typos correction is applied only when the word is all lower case, has
+one correction, and is not part of a word with a digit or underscore;
+"Teh", "TEH", "foo_bar_teh", "teh2" and "alle" (all? alley?) go to the
+model.
+.RE
+.IP
+"Go to the model" means an item with KEEP among its choices; without a
+model, it is listed for review with LanguageTool's or typos' reason. An
+edit that overlaps another edit and so cannot be applied is listed for
+review too ("not applied: it overlaps another edit").
+.TP
+.B basics
+The built-in checks of tier 1, which need no tools. Doubled words always
+run: a repeat on the closed list ("the the") is fixed, a capitalised one
+("The The") is listed for review, and any other ("that that", "had had",
+"very very") goes to the model with KEEP, or is listed for review without
+one. Without LanguageTool's mechanical pass, basics also fixes the spacing
+around commas, periods, semicolons and colons where that is provably right
+(never next to a digit, in an emoticon or :shortcode:, or before ".bashrc"),
+and lists "Press : to enter" and the like for review.
 .TP
 .B 2 adjudicated
 Unknown words and grammar rules with candidate fixes. LanguageTool

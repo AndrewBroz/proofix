@@ -135,3 +135,9 @@ def spacing_edits(text, spans):
 def spacing_notes(text, spans):
     """[(offset of the mark, mark)] for review: "Note : the", "Press : to enter"."""
     return _spacing(text, spans)[1]
+
+
+def missing_space_edits(text, spans, marks=",;:"):
+    """Only the missing-space-after-a-mark edits of spacing_edits, for those marks."""
+    return [e for e in _spacing(text, spans)[0] if e.original in marks and e.original
+            and e.replacement == e.original + " "]

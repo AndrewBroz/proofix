@@ -43,6 +43,8 @@ class StubModel(BaseHTTPRequestHandler):
                     choice = options[0] if word[0].islower() or word == "Teh" else "KEEP"
                     if word in ("third-party", "long-term"):
                         choice = "KEEP"                            # already right as modifiers
+                    if word == "..":
+                        choice = options[0]                        # '.' (or '…'): the audit routes it here
                     if "However" in line:
                         choice = "KEEP"
                     decisions.append({"id": num, "choice": choice, "confidence": 0.9, "reason": "stub"})
@@ -72,7 +74,7 @@ def replay_lt(monkeypatch):
     the matches whose context still exists, as parse_matches's search does."""
     fixture = FIX.read_text()
     monkeypatch.setattr(api, "find_languagetool", lambda: "/replay/languagetool")
-    monkeypatch.setattr(api, "run_languagetool", lambda text, target, level="default": parse_matches(fixture, text))
+    monkeypatch.setattr(api, "run_languagetool", lambda text, target, level="default", **kw: parse_matches(fixture, text))
 
 
 def test_end_to_end(tmp_path, replay_lt, stub_url, capsys):
@@ -85,7 +87,9 @@ def test_end_to_end(tmp_path, replay_lt, stub_url, capsys):
     text = out.read_text()
     err = capsys.readouterr().err
     # tier 1: mechanical
-    assert "the the" not in text and "report ," not in text and "said ." not in text and "teams.." not in text
+    assert "the the" not in text and "report ," not in text and "said ." not in text
+    # '..' has two answers ('.' or '…'): adjudicated since the audit; the stub picks '.'
+    assert "teams.." not in text and "three separate teams.\n" in text
     # tier 2: spelling via the stub
     assert "The committee received" in text and "definitely clear" in text and "three separate teams" in text
     # tier 3: commas under the guard

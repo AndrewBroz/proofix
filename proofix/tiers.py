@@ -7,23 +7,58 @@ import re
 from dataclasses import dataclass, replace
 
 from adjudicate import Edit, Item, protected_spans, sentence_context
+from adjudicate.apply import to_offsets
+
+from . import basics
 
 from .basics import CLOSED_DOUBLES, DOUBLE_RULE, Double, double_edit, doubled_words
 from .lt import Match
 
-# Rules whose single replacement is mechanical and always right in prose.
-# ENGLISH_WORD_REPEAT_RULE is not here: "that that" and "had had" are often
-# grammatical, so its matches are routed in partition() as basics routes doubles.
+# LanguageTool rules whose replacement may be applied outright, each only where the
+# audit (spec §7) found it right in every prose context; elsewhere a match is routed
+# like any other rule (a model decides, KEEP offered; review without one). See _outright.
 DETERMINISTIC = {
-    "COMMA_PARENTHESIS_WHITESPACE", "SENTENCE_WHITESPACE", "DOUBLE_PUNCTUATION",
-    "UNLIKELY_OPENING_PUNCTUATION", "WHITESPACE_RULE",
+    # Always right only where basics' audited spacing check makes the same edit ("report ,"),
+    # or for a space just inside a bracket beside a letter or digit ("( as noted )").
+    # Elsewhere routed: ".bashrc", ". . .", "1 ,000", "( ͡°".
+    "COMMA_PARENTHESIS_WHITESPACE",
+    # Always right when LanguageTool offers one answer (",," -> ","). ".." offers "." and
+    # "…" and may be a path ("cd .."): routed.
+    "DOUBLE_PUNCTUATION",
+    # Always right mid-line in prose: Markdown renders the run as one space. Not a fault,
+    # so skipped: line-start indentation, trailing spaces (a hard line break), table
+    # rows (alignment) and indented code lines.
+    "WHITESPACE_RULE",
 }
+# Moved out of DETERMINISTIC by the audit: "Node.Js", "file.Name" are not two sentences;
+# a paragraph may open with ", and so on" after a quotation or list.
+MOVED = {"SENTENCE_WHITESPACE", "UNLIKELY_OPENING_PUNCTUATION"}
+# ENGLISH_WORD_REPEAT_RULE is not in DETERMINISTIC: "that that" and "had had" are often
+# grammatical, so its matches are routed in partition() as basics routes doubles.
 REPEAT = "ENGLISH_WORD_REPEAT_RULE"
 # Rules stylefix owns, or that misfire on Markdown.
 IGNORED = {"EN_QUOTES", "DASH_RULE", "PUNCTUATION_PARAGRAPH_END", "UPPERCASE_SENTENCE_START",
            "WORD_CONTAINS_UNDERSCORE", "ARROWS", "MULTIPLICATION_SIGN", "EN_UNPAIRED_BRACKETS"}
 SPELLING = {"MORFOLOGIK_RULE_EN_US", "MORFOLOGIK_RULE_EN_GB", "MORFOLOGIK_RULE_EN_AU",
             "MORFOLOGIK_RULE_EN_CA", "MORFOLOGIK_RULE_EN_NZ", "MORFOLOGIK_RULE_EN_ZA"}
+
+# The rules of the mechanical tier (pass 1): their review matches are kept when there is
+# no pass 2 to route them again.
+MECHANICAL = DETERMINISTIC | MOVED | {"ENGLISH_WORD_REPEAT_RULE"}
+
+# LanguageTool rules that contradict the target variety, disabled when it runs:
+# uk_ise (UK, the guide does not use -ize): the Oxford -ize suggestions. Of the
+# BRE_STYLE_OXFORD_SPELLING category, only OXFORD_SPELLING_Z_NOT_S (and the
+# gramme -> gram rule, which is not about -ize) exists in LanguageTool 6.8; the
+# NOUNS/ISE_VERBS/ADJECTIVES/ADVERBS/IZE ids appear only in comments.
+# us: en-US has no rule suggesting British spellings. It reports "colour" and
+# "organise" only as MORFOLOGIK_RULE_EN_US "... is British English", which cannot be
+# disabled without disabling spelling, and which partition() already drops as a
+# variety difference (stylefix's job).
+VARIETY_DISABLED: dict[str, frozenset[str]] = {
+    "uk_ise": frozenset({"OXFORD_SPELLING_Z_NOT_S"}),
+    "us": frozenset(),
+}
 
 SPELLING_RULE = ("Choose the correctly spelled word only if the marked text is an ordinary word "
                  "misspelled. KEEP if it is a name, an acronym, a product, jargon, a code "
@@ -56,18 +91,76 @@ def _line_start(text: str, pos: int) -> bool:
     return pos == 0 or text[pos - 1] == "\n" or text[text.rfind("\n", 0, pos) + 1:pos].strip() == ""
 
 
-_MISSING_SPACE = re.compile(r"[;:](?=[A-Za-z])")   # "issues;the", "note:the"; digits (10:30) excluded
-
-
 def mechanical_edits(text: str, spans: list[tuple[int, int]]) -> list[Edit]:
-    """Faults LanguageTool has no rule for."""
-    out = []
-    for m in _MISSING_SPACE.finditer(text):
-        if any(s <= m.start() < e for s, e in spans):
-            continue
-        line, col = _line_col(text, m.start())
-        out.append(Edit(line, col, col, m.group(0), m.group(0) + " ", "MISSING_SPACE"))
+    """Faults LanguageTool has no rule for: a missing space after ; or : ("issues;the").
+    basics' audited rule decides (not "a:b", ":D", ":wave:", "10:30"); one implementation."""
+    return [replace(e, source="MISSING_SPACE") for e in basics.missing_space_edits(text, spans, ";:")]
+
+
+def _minimal(start: int, original: str, replacement: str) -> tuple[int, str, str]:
+    """(start, original, replacement) with the common prefix and suffix trimmed."""
+    k = 0
+    while k < min(len(original), len(replacement)) and original[k] == replacement[k]:
+        k += 1
+    j = 0
+    while (j < min(len(original), len(replacement)) - k
+           and original[len(original) - 1 - j] == replacement[len(replacement) - 1 - j]):
+        j += 1
+    return start + k, original[k:len(original) - j], replacement[k:len(replacement) - j]
+
+
+def _spacing_fixes(text: str, spans: list[tuple[int, int]]) -> set[tuple[int, str, str]]:
+    out = set()
+    for e in basics.spacing_edits(text, spans):
+        s, _ = to_offsets(text, e)
+        out.add(_minimal(s, e.original, e.replacement))
     return out
+
+
+def _outright(text: str, m: Match, spacing: set[tuple[int, str, str]]) -> bool | None:
+    """True: apply this DETERMINISTIC match outright. False: route it (model or review).
+    None: not a fault (alignment, a hard line break, code): leave it alone."""
+    original = text[m.start:m.end]
+    if m.rule == "WHITESPACE_RULE":
+        ls = text.rfind("\n", 0, m.start) + 1
+        le = text.find("\n", m.end)
+        line = text[ls:le if le >= 0 else len(text)]
+        if (_line_start(text, m.start) or not text[m.end:le if le >= 0 else len(text)].strip()
+                or "|" in line or line.startswith(("    ", "\t"))):
+            return None
+        return True
+    if m.rule == "DOUBLE_PUNCTUATION":
+        return len(set(m.replacements)) == 1
+    if m.rule == "COMMA_PARENTHESIS_WHITESPACE":
+        rep = m.replacements[0]
+        if _minimal(m.start, original, rep) in spacing:
+            return True
+        after, before = text[m.end:m.end + 1], text[m.start - 1:m.start] if m.start else ""
+        if original.rstrip() in ("(", "[") and original != original.rstrip() and rep == original.rstrip():
+            return after.isalnum()
+        if original.lstrip() in (")", "]") and original != original.lstrip() and rep == original.lstrip():
+            return before.isalnum()
+        return False
+    return True
+
+
+def _readable(text: str, start: int, end: int, reps: list[str]) -> tuple[int, int, list[str]]:
+    """Widen a span so no option is blank or edged with a space: a deletion takes the next
+    word (", and" -> "and"), a space added at an edge takes the neighbouring character
+    (".However" -> ". However")."""
+    if any(r == "" for r in reps):
+        mm = re.compile(r"[ \t]*[^\s]+").match(text, end)
+        if mm:
+            tail = text[end:mm.end()]
+            reps = [r + tail if r else tail.lstrip() for r in reps]
+            end = mm.end()
+    if any(r[:1].isspace() for r in reps) and start > 0 and text[start - 1] not in "\n":
+        reps = [text[start - 1] + r for r in reps]
+        start -= 1
+    if any(r[-1:].isspace() for r in reps) and end < len(text) and text[end] != "\n":
+        reps = [r + text[end] for r in reps]
+        end += 1
+    return start, end, reps
 
 
 def double_item(text: str, d: Double, item_id: int) -> Item:
@@ -122,6 +215,7 @@ def partition(text: str, matches: list[Match], accept: set[str] | None = None,
     review: list[Match] = []
     next_id = 1
     doubles = {(d.first_start, d.end): d for d in doubled_words(text, spans)}
+    spacing: set[tuple[int, str, str]] | None = None
     for m in matches:
         if m.rule in IGNORED or _overlaps(m, spans):
             continue
@@ -146,18 +240,26 @@ def partition(text: str, matches: list[Match], accept: set[str] | None = None,
                 review.append(replace(m, message=double_message(text, d)))
             continue
         if m.rule in DETERMINISTIC and m.replacements:
-            if m.rule == "WHITESPACE_RULE" and _line_start(text, m.start):
-                continue          # list indentation, code-ish alignment
-            edits.append(to_edit(text, m, m.replacements[0], m.rule))
-            continue
+            if spacing is None:
+                spacing = _spacing_fixes(text, spans)
+            verdict = _outright(text, m, spacing)
+            if verdict is None:
+                continue          # list indentation, alignment, a hard line break, code
+            if verdict:
+                edits.append(to_edit(text, m, m.replacements[0], m.rule))
+                continue
         if m.replacements and adjudicate_available:
-            options = tuple(dict.fromkeys(m.replacements[:4])) + ("KEEP",)
+            start, end, reps = m.start, m.end, list(m.replacements[:4])
+            if m.rule in DETERMINISTIC | MOVED:
+                start, end, reps = _readable(text, start, end, reps)
+            word = text[start:end]
+            options = tuple(dict.fromkeys(r for r in reps if r != word)) + ("KEEP",)
             rule = SPELLING_RULE if m.rule in SPELLING else (
                 f"LanguageTool ({m.rule}): {m.message} Choose the option that makes the sentence "
                 "correct; KEEP if the original is acceptable or the suggestion changes the meaning.")
-            items.append(Item(next_id, original, options, rule,
-                              sentence_context(text, m.start, m.end),
-                              *_line_col(text, m.start), _line_col(text, m.start)[1] + m.length - 1,
+            line, col = _line_col(text, start)
+            items.append(Item(next_id, word, options, rule, sentence_context(text, start, end),
+                              line, col, col + (end - start) - 1,
                               source="spelling" if m.rule in SPELLING else "grammar"))
             next_id += 1
             continue
@@ -165,10 +267,17 @@ def partition(text: str, matches: list[Match], accept: set[str] | None = None,
     return Partition(edits, items, review)
 
 
-def typos_edits(text: str, json_lines: str, spans: list[tuple[int, int]] | None = None) -> list[Edit]:
-    """Edits from `typos --format json` output, kept out of protected spans."""
+def _typos(text: str, json_lines: str, spans: list[tuple[int, int]] | None,
+           accept: set[str] | frozenset[str] | None) -> list[tuple[int, str, list[str], bool]]:
+    """(offset, typo, corrections, outright) from `typos --format json` output, kept out of
+    protected spans and accept lists. Outright only when provably right: the typo is all
+    lower case (not a name, an acronym or a sentence-initial word whose case is a
+    guess), not within a word containing a digit or underscore (an identifier), and
+    typos offers exactly one correction (two, as for "alle" -> all/alley, mean the word
+    may be another language's or another word's)."""
     import json
     spans = protected_spans(text) if spans is None else spans
+    accept = {w.lower() for w in (accept or ())}
     lines = text.split("\n")
     starts = [0]
     for ln in lines[:-1]:
@@ -187,10 +296,49 @@ def typos_edits(text: str, json_lines: str, spans: list[tuple[int, int]] | None 
         line = lines[ln]
         col = len(line.encode("utf-8")[:int(d["byte_offset"])].decode("utf-8", "ignore"))
         word = d["typo"]
-        if line[col:col + len(word)] != word:
+        if line[col:col + len(word)] != word or word.lower() in accept:
             continue
         pos = starts[ln] + col
         if any(s <= pos < e for s, e in spans):
             continue
-        out.append(Edit(ln + 1, col + 1, col + len(word), word, d["corrections"][0], "typos"))
+        a, b = col, col + len(word)
+        while a > 0 and (line[a - 1].isalnum() or line[a - 1] == "_"):
+            a -= 1
+        while b < len(line) and (line[b].isalnum() or line[b] == "_"):
+            b += 1
+        token = line[a:b]
+        corrections = list(d["corrections"])
+        outright = (word.islower() and word.isalpha() and len(corrections) == 1
+                    and not any(ch.isdigit() or ch == "_" for ch in token))
+        out.append((pos, word, corrections, outright))
     return out
+
+
+def typos_edits(text: str, json_lines: str, spans: list[tuple[int, int]] | None = None,
+                accept: set[str] | frozenset[str] | None = None) -> list[Edit]:
+    """Edits from `typos --format json` output: only the provably right ones (see _typos)."""
+    out = []
+    for pos, word, corrections, outright in _typos(text, json_lines, spans, accept):
+        if outright:
+            line, col = _line_col(text, pos)
+            out.append(Edit(line, col, col + len(word) - 1, word, corrections[0], "typos"))
+    return out
+
+
+def typos_matches(text: str, json_lines: str, spans: list[tuple[int, int]] | None = None,
+                  accept: set[str] | frozenset[str] | None = None) -> list[Match]:
+    """The rest of typos' findings, as matches for the spelling route: a model decides
+    (SPELLING_RULE, KEEP offered), or they are listed for review."""
+    return [Match(pos, pos + len(word), "typos", "TYPOS",
+                  f"'{word}' may be a misspelling of " + " or ".join(f"'{c}'" for c in corrections),
+                  "", corrections)
+            for pos, word, corrections, outright in _typos(text, json_lines, spans, accept)
+            if not outright]
+
+
+def typos_item(text: str, m: Match, item_id: int) -> Item:
+    line, col = _line_col(text, m.start)
+    word = text[m.start:m.end]
+    options = tuple(dict.fromkeys(c for c in m.replacements[:4] if c != word)) + ("KEEP",)
+    return Item(item_id, word, options, SPELLING_RULE, sentence_context(text, m.start, m.end),
+                line, col, col + len(word) - 1, source="spelling")

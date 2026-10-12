@@ -15,9 +15,10 @@ from adjudicate.llm import Endpoint
 
 from . import basics, consistency, hygiene
 from .commas import CommaCache, CommaResult, comma_edits, correct_commas
-from .lt import Match, find_languagetool, run_languagetool
-from .tiers import (REPEAT, Partition, _line_col, accepted_double, double_item, double_message,
-                    double_route, partition, typos_edits)
+from .lt import LanguageToolServer, Match, find_languagetool, run_languagetool
+from .tiers import (IGNORED, MECHANICAL, REPEAT, VARIETY_DISABLED, Partition, _line_col,
+                    accepted_double, double_item, double_message, double_route, partition,
+                    typos_edits, typos_item, typos_matches)
 
 TASK = "You are a meticulous copy editor fixing typos and punctuation in a document written in {variety}."
 VARIETY = {"us": "American English", "uk": "British English"}
@@ -38,6 +39,7 @@ class Options:
     verbose: bool = False
     skip: frozenset[str] = frozenset()
     replay_cache: bool = False
+    oxford_ize: bool = False      # the style guide uses -ize: LanguageTool's Oxford rules stay on
 
 
 @dataclass
@@ -55,13 +57,50 @@ class Result:
     lt_missing: bool
 
 
-def run_typos(text: str) -> list[Edit]:
-    """Known-misspelling fixes from the `typos` tool, as edits, if installed."""
+def run_typos(text: str, accept: set[str] | frozenset[str] = frozenset()) -> tuple[list[Edit], list[Match]]:
+    """Known misspellings from the `typos` tool, if installed: (edits applied outright,
+    matches a model or a person decides). See tiers.typos_edits."""
     exe = shutil.which("typos")
     if not exe:
-        return []
+        return [], []
     proc = subprocess.run([exe, "--format", "json", "-"], input=text, capture_output=True, text=True)
-    return typos_edits(text, proc.stdout)
+    return typos_edits(text, proc.stdout, accept=accept), typos_matches(text, proc.stdout, accept=accept)
+
+
+# Rules partition() ignores, and CONSECUTIVE_SPACES (WHITESPACE_RULE's duplicate), are
+# disabled in LanguageTool itself: a server drops overlapping matches, so a rule that is
+# ignored anyway must not knock out one that is not.
+LT_DISABLED = IGNORED | {"CONSECUTIVE_SPACES"}
+
+
+def lt_disabled(o: Options) -> list[str]:
+    """The rules LanguageTool runs without: LT_DISABLED, and those that contradict the variety."""
+    key = "us" if o.target == "us" else ("uk_ise" if not o.oxford_ize else None)
+    return sorted(LT_DISABLED | (VARIETY_DISABLED[key] if key else frozenset()))
+
+
+def _overlap_reviews(before: str, applied: list[Edit], rejected: list[Edit], after: str,
+                     routed: set[tuple[int, int]], at_before: bool = False) -> list[Match]:
+    """Review matches for edits apply_edits rejected because another edit overlapped them,
+    where the original is still in the text: nothing is dropped silently. Positions are in
+    `after`, or in `before` with at_before (when the review list is read against it)."""
+    out = []
+    for e in rejected:
+        s, _ = to_offsets(before, e)
+        if before[s:s + len(e.original)] != e.original:
+            continue                      # stale: the text no longer matches the edit
+        pos = _shifted(before, applied, s)
+        found = after.find(e.original, max(0, pos - len(e.original)), pos + 2 * len(e.original))
+        if found < 0:
+            continue                      # the overlapping edit changed this text too
+        where = s if at_before else found
+        key = _line_col(before if at_before else after, where)
+        if key in routed:
+            continue
+        routed.add(key)
+        out.append(Match(where, where + len(e.original), e.source, "",
+                         f"'{e.original}' -> '{e.replacement}' not applied: it overlaps another edit", ""))
+    return out
 
 
 def _decided_by(d: Decision, model_used: bool) -> str:
@@ -83,8 +122,9 @@ def _shifted(text: str, applied: list[Edit], pos: int) -> int:
 
 
 def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
-        comma_cache: CommaCache) -> Result:
-    """Proofread text; no I/O on the caller's files. Raises LTError if LanguageTool fails."""
+        comma_cache: CommaCache, lt_server: LanguageToolServer | None = None) -> Result:
+    """Proofread text; no I/O on the caller's files. Raises LTError if LanguageTool fails.
+    With `lt_server` (a running LanguageToolServer), LanguageTool is asked through it."""
     o, ep = options, endpoint
     skip = o.skip
     asking = ep is not None or o.replay_cache
@@ -93,6 +133,7 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     skipped: list[Skipped] = []
     hygiene_notes: list[str] = []
     edits: list[Edit] = []
+    typos_held: list[Match] = []
     if "hygiene" not in skip:
         text, hygiene_notes = hygiene.normalize_text(text)
         h_edits, h_notes = hygiene.plan(text)
@@ -102,12 +143,14 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
         if shutil.which("typos") is None:
             skipped.append(Skipped("known-misspelling fixes", "typos not found", "brew install typos-cli"))
         else:
-            edits += run_typos(text)
+            t_edits, typos_held = run_typos(text, accept)
+            edits += t_edits
     typos_fixed = sum(1 for e in edits if e.source == "typos")
     decisions: list[Decision] = []
     review: list[Match] = []
     review_items: list[ReviewItem] = []
     lt_wanted = not {"mechanical", "adjudicated"} <= skip
+    disabled = lt_disabled(o)
     lt = find_languagetool() if lt_wanted else None
     lt_missing = lt_wanted and not lt
     if lt_missing:
@@ -119,15 +162,15 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     use_doubles = "basics" not in skip
     use_spacing = use_doubles and not (lt and "mechanical" not in skip)
     # Pass 1: mechanical faults (typos, whitespace, doubled punctuation), applied.
-    pass1_repeats: list[Match] = []
+    pass1_review: list[Match] = []
     lt_repeats: set[tuple[int, int]] = set()
     if lt and "mechanical" not in skip:
-        matches = run_languagetool(text, o.target, o.lt_level)
+        matches = run_languagetool(text, o.target, o.lt_level, disabled=disabled, server=lt_server)
         p1 = partition(text, matches, accept, adjudicate_available=False)
         edits += p1.edits
         lt_repeats = {(e.line, e.start) for e in p1.edits if e.source == REPEAT}
-        if "adjudicated" in skip:      # no pass 2 to route them: keep pass 1's repeat reviews
-            pass1_repeats = [m for m in p1.review if m.rule == REPEAT]
+        if "adjudicated" in skip:      # no pass 2 to route them: keep pass 1's mechanical reviews
+            pass1_review = [m for m in p1.review if m.rule in MECHANICAL]
     if use_doubles:
         spans = protected_spans(text)
         if use_spacing:
@@ -139,14 +182,14 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
             if (e.line, e.start) not in lt_repeats:        # LanguageTool's edit is the one kept
                 edits.append(e)
     pre_text = text
-    text, rejected = apply_edits(text, edits)
-    applied = [e for e in edits if e not in rejected]
-    p1_rejected_repeats = [e for e in rejected if e.source == REPEAT]
+    text, rejected_p1 = apply_edits(text, edits)
+    applied = [e for e in edits if e not in rejected_p1]
+    p1_rejected_repeats = [e for e in rejected_p1 if e.source == REPEAT]
     lt_pass2 = bool(lt) and "adjudicated" not in skip
     # Pass 2: judgement calls on the cleaned text, so spans no longer collide.
     review_text = text
     if lt_pass2:
-        matches = run_languagetool(text, o.target, o.lt_level)
+        matches = run_languagetool(text, o.target, o.lt_level, disabled=disabled, server=lt_server)
         part = partition(text, matches, accept, adjudicate_available=asking)
         # anything pass 1 exposed, or a repeat pass 1 did not catch ("the  the")
         edits = [e for e in part.edits if e.source in ("MISSING_SPACE", REPEAT)]
@@ -155,7 +198,7 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
         part = Partition([], [], [])
         edits = []
         review = [replace(m, start=_shifted(pre_text, applied, m.start),
-                          end=_shifted(pre_text, applied, m.end)) for m in pass1_repeats]
+                          end=_shifted(pre_text, applied, m.end)) for m in pass1_review]
     if use_doubles:
         # Doubles outside the closed list: adjudicated with a model, else reviewed.
         # One LanguageTool's repeat rule already routed is not raised twice.
@@ -192,6 +235,33 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
                 continue
             review.append(Match(pos, m.end() + pos, REPEAT, "",
                                 f"repeated word '{m.group(1)} {m.group(2)}'", ""))
+    routed = ({(e.line, e.start) for e in edits} | {(i.line, i.start) for i in part.items}
+              | {_line_col(text, m.start) for m in review})
+    if typos_held:
+        # typos' findings that are not provably right: a model decides (KEEP offered), else
+        # a person. One LanguageTool already routed at the same place is not raised twice.
+        next_id = max((i.id for i in part.items), default=0) + 1
+        for m in typos_held:
+            s = _shifted(pre_text, applied, m.start)
+            word = pre_text[m.start:m.end]
+            if text[s:s + len(word)] != word:
+                found = text.find(word, max(0, s - len(word)), s + 2 * len(word))
+                if found < 0:
+                    continue              # an overlapping fix changed the word
+                s = found
+            key = _line_col(text, s)
+            if key in routed:
+                continue
+            routed.add(key)
+            held = replace(m, start=s, end=s + len(word))
+            if asking:
+                part.items.append(typos_item(text, held, next_id))
+                next_id += 1
+            else:
+                review.append(held)
+    # A pass-1 edit that lost to an overlapping one (other than the repeats above).
+    review += _overlap_reviews(pre_text, applied, [e for e in rejected_p1 if e.source != REPEAT],
+                               text, routed)
     system = system_prompt(TASK.format(variety=VARIETY[o.target]))
     if part.items:
         decisions = adjudicate(ep, f"proofix|{o.target}", part.items, cache,
@@ -200,11 +270,15 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
         for d in decisions:
             if d.choice is not None and d.confidence < o.min_confidence:
                 d.reason, d.choice = f"low confidence ({d.confidence:.2f}): {d.reason}", None
-            if d.replacement:
+            if d.replacement is not None:
                 edits.append(Edit(d.item.line, d.item.start, d.item.end, d.item.word,
                                   d.replacement, "adjudicated"))
     new_text, rejected = apply_edits(text, edits)
-    applied += [e for e in edits if e not in rejected]
+    pass2_applied = [e for e in edits if e not in rejected]
+    # an edit (a decision, too) that lost to an overlapping one: listed unless already listed
+    review += _overlap_reviews(text, pass2_applied, rejected, new_text,
+                               {_line_col(text, m.start) for m in review}, at_before=True)
+    applied += pass2_applied
     text = new_text
     # Pass 3: compounds and consistency, on the text as it now stands.
     if "compounds" not in skip and asking:
@@ -251,7 +325,7 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
             for e in comma_edits(before_commas, r.sentence, r.new_text):
                 ann.append(Annotation(e.original, e.replacement, "commas", r.reason, by, r.confidence))
     for d in decisions:
-        if d.replacement:
+        if d.replacement is not None:
             ann.append(Annotation(d.item.word, d.replacement, "adjudicated", d.reason,
                                   _decided_by(d, ep is not None), d.confidence))
     ann += [Annotation(e.original, e.replacement, e.source) for e in applied]

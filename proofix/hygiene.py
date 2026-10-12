@@ -66,6 +66,31 @@ def _joins_emoji(text: str, pos: int) -> bool:
             and _pictographic(text[pos + 1]) and text[pos + 1] != "\ufe0f")
 
 
+def _joins_script(text: str, pos: int) -> bool:
+    """A joiner or non-joiner beside a letter or mark of a script that spells with it
+    (Persian, Arabic, the Indic scripts): part of the word, not stray."""
+    import unicodedata as ud
+    return any(0 <= i < len(text) and ord(text[i]) > 0x2FF
+               and (text[i].isalpha() or ud.category(text[i]) in ("Mn", "Mc"))
+               for i in (pos - 1, pos + 1))
+
+
+def _becomes_markdown(text: str, start: int, end: int, decoded: str) -> bool:
+    """Whether the plain character would start Markdown syntax where the entity stands: a
+    list marker or ordered-list dot ("&#45; ", "2020&#46; "), indentation that makes code,
+    a setext underline ("&#61;&#61;"), or trailing spaces that make a hard line break."""
+    ls = text.rfind("\n", 0, start) + 1
+    le = text.find("\n", end)
+    before = _ENTITY.sub("", text[ls:start])
+    after = _ENTITY.sub("", text[end:le if le >= 0 else len(text)])
+    if decoded in ".)" and re.fullmatch(r"[ \t]*\d+", before):
+        return True
+    if decoded in "-+=" or decoded.isspace():
+        if not before.strip():
+            return True
+    return decoded.isspace() and not after.strip()
+
+
 def _line(text: str, pos: int) -> int:
     return text.count("\n", 0, pos) + 1
 
@@ -103,6 +128,10 @@ def plan(text: str) -> tuple[list[Edit], list[Note]]:
             continue
         if decoded.isspace() and decoded != " ":
             decoded = " "
+        if _becomes_markdown(text, m.start(), m.end(), decoded):
+            notes.append(Note(_line(text, m.start()), ent,
+                              f"'{ent}' left as written: the plain character would change how Markdown reads the line."))
+            continue
         col = _col(text, m.start())
         edits.append(Edit(_line(text, m.start()), col, col + len(ent) - 1, ent, decoded, "hygiene"))
     for m in _INVISIBLE.finditer(text):
@@ -110,6 +139,8 @@ def plan(text: str) -> tuple[list[Edit], list[Note]]:
             continue
         if m.group(0) == _ZWJ and _joins_emoji(text, m.start()):
             continue                     # part of an emoji sequence, not stray
+        if m.group(0) in (_ZWJ, "\u200c") and _joins_script(text, m.start()):
+            continue                     # Persian, Hindi: part of the spelling
         col = _col(text, m.start())
         edits.append(Edit(_line(text, m.start()), col, col, m.group(0), "", "hygiene"))
         notes.append(Note(_line(text, m.start()), NAMES.get(m.group(0), "invisible character"),

@@ -29,8 +29,9 @@ def test_partition_tiers_and_protection():
     part = partition(text, ms, accept={"programme"})
     det = {(e.original, e.replacement) for e in part.edits}
     assert (" ,", ",") in det or (" ,", ", ") in det
-    assert ("the the", "the") in det and ("..", ".") in det
+    assert ("the the", "the") in det
     words = {it.word for it in part.items}
+    assert ".." in words                  # two answers ('.' or '…'): the audit routes it to the model
     assert {"Teh", "recieved", "definately", "seperate"} <= words
     assert "programme" not in words and "analysed" not in words   # accept list; variety is stylefix's job
     assert "teh" in words and "`recieved`" not in words   # link text is prose; code is protected
@@ -76,15 +77,17 @@ def test_gate():
 
 
 def test_typos_edits_respect_protection():
-    from proofix.tiers import typos_edits
+    from proofix.tiers import typos_edits, typos_matches
     text = "# T\n\nTeh `recieved` report was recieved.\n"
     js = ('{"type":"typo","path":"-","line_num":3,"byte_offset":0,"typo":"Teh","corrections":["The"]}\n'
           '{"type":"typo","path":"-","line_num":3,"byte_offset":5,"typo":"recieved","corrections":["received"]}\n'
           '{"type":"typo","path":"-","line_num":3,"byte_offset":26,"typo":"recieved","corrections":["received"]}\n')
     edits = typos_edits(text, js)
-    assert [(e.start, e.original) for e in edits] == [(1, "Teh"), (27, "recieved")]
+    # "Teh" is capitalised, so not provably right (a name?): held back for the model or review
+    assert [(e.start, e.original) for e in edits] == [(27, "recieved")]
+    assert [m.start for m in typos_matches(text, js)] == [5]
     new, skipped = apply_edits(text, edits)
-    assert new == "# T\n\nThe `recieved` report was received.\n" and not skipped
+    assert new == "# T\n\nTeh `recieved` report was received.\n" and not skipped
 
 
 def test_sentences_span_links_and_map_back():
@@ -187,7 +190,7 @@ def test_proofix_fix_lands_on_the_right_characters_after_emoji(monkeypatch):
     text = "😀😀 It was nice,  ok.\n"
     fixture = _lt_json(text, 17, 2, "😀😀 It was nice,  ok. ", 17, rule="WHITESPACE_RULE")
     monkeypatch.setattr(api, "find_languagetool", lambda: "/replay/languagetool")
-    monkeypatch.setattr(api, "run_languagetool", lambda t, target, level="default": parse_matches(fixture, t))
+    monkeypatch.setattr(api, "run_languagetool", lambda t, target, level="default", **kw: parse_matches(fixture, t))
     r = api.fix(text, api.Options(skip=frozenset({"commas"})), None, Cache(None), CommaCache(None))
     assert r.text == "😀😀 It was nice, ok.\n"
 

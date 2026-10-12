@@ -1,13 +1,13 @@
 [project]
 name = "proofix"
-version = "0.6.0"
+version = "0.7.0"
 description = "Fix typos and punctuation in Markdown: LanguageTool detects, a language model adjudicates, comma placement is corrected under a diff guard."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Andrew Brož" }]
-dependencies = ["adjudicate>=0.3.1,<0.4"]
+dependencies = ["adjudicate>=0.3.2,<0.4"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",

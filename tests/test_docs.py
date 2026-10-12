@@ -102,3 +102,14 @@ def test_timeout_must_be_positive(value, capsys):
 
 def test_timeout_accepts_a_positive_number():
     assert build_parser().parse_args(["--timeout", "0.5"]).timeout == 0.5
+
+
+def test_basics_tier_and_the_audit_are_documented():
+    from proofix.api import TIERS as API_TIERS
+    assert "basics" in API_TIERS
+    assert ".B basics" in MAN                               # its own entry in the tier list
+    man = flat(PLAIN)
+    for phrase in ("right in every context", "all lower case", "hard line break", "Node.Js",
+                   "cd ..", "overlaps another"):
+        assert phrase in man, phrase
+    assert "all lower case" in flat(README) and "right in every context" in flat(README)

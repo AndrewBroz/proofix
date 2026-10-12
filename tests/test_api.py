@@ -63,7 +63,7 @@ class Fake(Endpoint):
 def test_model_decided_compound_is_labelled_model(monkeypatch):
     fixture = (Path(__file__).parent / "fixtures" / "typos.lt.json").read_text()
     monkeypatch.setattr(api, "find_languagetool", lambda: "/replay/languagetool")
-    monkeypatch.setattr(api, "run_languagetool", lambda t, target, level="default": parse_matches(fixture, t))
+    monkeypatch.setattr(api, "run_languagetool", lambda t, target, level="default", **kw: parse_matches(fixture, t))
     r = api.fix(TYPOS, api.Options(skip=frozenset({"typos", "commas"})),
                 Fake(url="http://x/v1", model="m"), Cache(None), CommaCache(None))
     assert apply_changes(TYPOS, r.changes) == r.text

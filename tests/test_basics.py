@@ -46,7 +46,7 @@ def _replay(monkeypatch, fixture):
     monkeypatch.setenv("PATH", "/nonexistent")                     # no typos
     monkeypatch.setattr(api, "find_languagetool", lambda: "/replay/languagetool")
     monkeypatch.setattr(api, "run_languagetool",
-                        lambda text, target, level="default": parse_matches(fixture, text))
+                        lambda text, target, level="default", **kw: parse_matches(fixture, text))
 
 
 @pytest.fixture
