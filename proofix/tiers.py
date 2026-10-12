@@ -4,17 +4,21 @@ and review, with Markdown structure protected."""
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from adjudicate import Edit, Item, protected_spans, sentence_context
 
+from .basics import DOUBLE_RULE, Double, double_edit, doubled_words
 from .lt import Match
 
 # Rules whose single replacement is mechanical and always right in prose.
+# ENGLISH_WORD_REPEAT_RULE is not here: "that that" and "had had" are often
+# grammatical, so its matches are routed in partition() as basics routes doubles.
 DETERMINISTIC = {
     "COMMA_PARENTHESIS_WHITESPACE", "SENTENCE_WHITESPACE", "DOUBLE_PUNCTUATION",
-    "ENGLISH_WORD_REPEAT_RULE", "UNLIKELY_OPENING_PUNCTUATION", "WHITESPACE_RULE",
+    "UNLIKELY_OPENING_PUNCTUATION", "WHITESPACE_RULE",
 }
+REPEAT = "ENGLISH_WORD_REPEAT_RULE"
 # Rules stylefix owns, or that misfire on Markdown.
 IGNORED = {"EN_QUOTES", "DASH_RULE", "PUNCTUATION_PARAGRAPH_END", "UPPERCASE_SENTENCE_START",
            "WORD_CONTAINS_UNDERSCORE", "ARROWS", "MULTIPLICATION_SIGN", "EN_UNPAIRED_BRACKETS"}
@@ -66,6 +70,23 @@ def mechanical_edits(text: str, spans: list[tuple[int, int]]) -> list[Edit]:
     return out
 
 
+def double_item(text: str, d: Double, item_id: int) -> Item:
+    """An adjudication item for a doubled word: one copy (as the first is cased) or KEEP."""
+    s = d.first_start
+    word = text[s:d.end]
+    line, col = _line_col(text, s)
+    return Item(item_id, word, (text[s:d.start], "KEEP"), DOUBLE_RULE,
+                sentence_context(text, s, d.end), line, col, col + len(word) - 1, source="repeat")
+
+
+def double_message(text: str, d: Double) -> str:
+    return f"repeated word '{text[d.first_start:d.start]} {d.word}'"
+
+
+def accepted_double(text: str, d: Double, accept: set[str]) -> bool:
+    return f"{text[d.first_start:d.start]} {d.word}".lower() in accept
+
+
 def partition(text: str, matches: list[Match], accept: set[str] | None = None,
               adjudicate_available: bool = True) -> Partition:
     accept = {w.lower() for w in (accept or ())}
@@ -74,6 +95,7 @@ def partition(text: str, matches: list[Match], accept: set[str] | None = None,
     items: list[Item] = []
     review: list[Match] = []
     next_id = 1
+    doubles = {(d.first_start, d.end): d for d in doubled_words(text, spans)}
     for m in matches:
         if m.rule in IGNORED or _overlaps(m, spans):
             continue
@@ -82,6 +104,21 @@ def partition(text: str, matches: list[Match], accept: set[str] | None = None,
             continue
         if m.rule in SPELLING and ("British English" in m.message or "American English" in m.message):
             continue          # a variety difference, not a typo: stylefix's job
+        if m.rule == REPEAT:
+            # Routed exactly as basics routes its doubles. A match basics would not
+            # call a double (across a blank line, into a list/quote/heading/table
+            # line, a capitalised pair) is left alone.
+            d = doubles.get((m.start, m.end))
+            if d is None or accepted_double(text, d, accept):
+                continue
+            if d.closed:
+                edits.append(replace(double_edit(text, d), source=m.rule))
+            elif adjudicate_available:
+                items.append(double_item(text, d, next_id))
+                next_id += 1
+            else:
+                review.append(replace(m, message=double_message(text, d)))
+            continue
         if m.rule in DETERMINISTIC and m.replacements:
             if m.rule == "WHITESPACE_RULE" and _line_start(text, m.start):
                 continue          # list indentation, code-ish alignment

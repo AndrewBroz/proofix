@@ -28,8 +28,12 @@ first. Every change is logged.
 .TP
 .B 1 mechanical
 A space before a comma or period, a missing space after one, doubled
-punctuation, doubled words, known misspellings. Found by LanguageTool's
-single-answer rules and the typos tool; applied outright.
+punctuation, doubled words whose repeat is never grammatical ("the the",
+"of of"), known misspellings. Found by LanguageTool's single-answer rules
+and the typos tool; applied outright. Without LanguageTool, the built-in
+basics check fixes the spacing and doubled words. Other doubles ("that
+that", "had had", "very very") go to the model with KEEP, or are listed for
+review without one.
 .TP
 .B 2 adjudicated
 Unknown words and grammar rules with candidate fixes. LanguageTool

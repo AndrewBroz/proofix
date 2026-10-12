@@ -24,9 +24,12 @@ Five tiers, each bounded so every change is one logged, reasoned edit:
    byte-order marks, soft hyphens, control characters, Windows line endings
    and decomposed accents are fixed deterministically.
 1. Mechanical faults with one right answer are fixed outright: a space before a
-   comma or period, a missing space after one, doubled punctuation, doubled
-   words. Detected by LanguageTool (and, if installed, the `typos` tool for
-   known misspellings).
+   comma or period, a missing space after one, doubled punctuation, a doubled
+   "the", "of" or other word whose repeat is never grammatical. Detected by
+   LanguageTool (and, if installed, the `typos` tool for known misspellings);
+   without LanguageTool, a small built-in check (tier "basics") fixes the
+   spacing and doubled words. Other doubles ("that that", "had had") are
+   adjudicated by the model, or listed for review without one.
 2. Adjudicated: LanguageTool proposes spellings or grammar fixes, and a
    language model picks one or KEEP from the sentence and the rule's message.
 3. Compounds and consistency: the model chooses closed, hyphenated or open

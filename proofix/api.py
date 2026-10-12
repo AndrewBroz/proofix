@@ -7,18 +7,19 @@ import subprocess
 from dataclasses import dataclass
 
 from adjudicate import Annotation, Change, ReviewItem, Skipped, derive_changes
-from adjudicate import Cache, Edit, adjudicate, apply_edits, system_prompt
+from adjudicate import Cache, Edit, adjudicate, apply_edits, protected_spans, system_prompt
 from adjudicate.core import Decision
 from adjudicate.llm import Endpoint
 
-from . import consistency, hygiene
+from . import basics, consistency, hygiene
 from .commas import CommaCache, CommaResult, comma_edits, correct_commas
 from .lt import Match, find_languagetool, run_languagetool
-from .tiers import Partition, partition, typos_edits
+from .tiers import (Partition, _line_col, accepted_double, double_item, double_message, partition,
+                    typos_edits)
 
 TASK = "You are a meticulous copy editor fixing typos and punctuation in a document written in {variety}."
 VARIETY = {"us": "American English", "uk": "British English"}
-TIERS = ("hygiene", "mechanical", "typos", "adjudicated", "compounds", "commas")
+TIERS = ("hygiene", "mechanical", "basics", "typos", "adjudicated", "compounds", "commas")
 
 
 @dataclass
@@ -75,7 +76,7 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     o, ep = options, endpoint
     skip = o.skip
     asking = ep is not None or o.replay_cache
-    accept = set(o.accept)
+    accept = {w.lower() for w in o.accept}
     original = text
     skipped: list[Skipped] = []
     hygiene_notes: list[str] = []
@@ -100,10 +101,17 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     if lt_missing:
         skipped.append(Skipped("grammar and spelling fixes (tiers 1 and 2)", "LanguageTool not found",
                                "brew install languagetool"))
+    # basics stands in for LanguageTool's mechanical pass when that pass will not run.
+    use_basics = "basics" not in skip and not (lt and "mechanical" not in skip)
     # Pass 1: mechanical faults (typos, whitespace, doubled punctuation), applied.
     if lt and "mechanical" not in skip:
         matches = run_languagetool(text, o.target, o.lt_level)
         edits += partition(text, matches, accept, adjudicate_available=False).edits
+    if use_basics:
+        spans = protected_spans(text)
+        edits += basics.spacing_edits(text, spans)
+        edits += [basics.double_edit(text, d) for d in basics.doubled_words(text, spans)
+                  if d.closed and not accepted_double(text, d, accept)]
     text, rejected = apply_edits(text, edits)
     applied = [e for e in edits if e not in rejected]
     # Pass 2: judgement calls on the cleaned text, so spans no longer collide.
@@ -116,6 +124,19 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     else:
         part = Partition([], [], [])
         edits = []
+    if use_basics:
+        # Doubles outside the closed list: adjudicated with a model, else reviewed.
+        # One LanguageTool already routed in pass 2 is not raised twice.
+        seen = {(i.line, i.start) for i in part.items} | {_line_col(text, m.start) for m in review}
+        next_id = max((i.id for i in part.items), default=0) + 1
+        for d in basics.doubled_words(text, protected_spans(text)):
+            if d.closed or accepted_double(text, d, accept) or _line_col(text, d.first_start) in seen:
+                continue
+            if asking:
+                part.items.append(double_item(text, d, next_id))
+                next_id += 1
+            else:      # listed with LanguageTool's review matches, so the CLI shows it too
+                review.append(Match(d.first_start, d.end, "basics", "", double_message(text, d), ""))
     system = system_prompt(TASK.format(variety=VARIETY[o.target]))
     if part.items:
         decisions = adjudicate(ep, f"proofix|{o.target}", part.items, cache,
@@ -185,7 +206,9 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
 
     review_items += [ReviewItem(_line_of(review_text, m.start), "alert", m.message, m.rule, "proofix")
                      for m in review]
-    review_items += [ReviewItem(d.item.line, "undecided", f"'{d.item.word}': {d.reason}",
+    review_items += [ReviewItem(d.item.line, "undecided",
+                                (f"repeated word '{' '.join(d.item.word.split())}': {d.reason}"
+                                 if d.item.source == "repeat" else f"'{d.item.word}': {d.reason}"),
                                 d.item.source, "proofix") for d in decisions if d.choice is None]
     for r in comma_results:
         if r.status in ("rejected", "note"):
