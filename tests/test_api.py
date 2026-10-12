@@ -1,8 +1,11 @@
+import json
 from pathlib import Path
 
 from adjudicate import Cache, apply_changes
+from adjudicate.llm import Endpoint
 from proofix import api
 from proofix.commas import CommaCache
+from proofix.lt import parse_matches
 
 TYPOS = (Path(__file__).parent.parent / "examples" / "typos.md").read_text()
 
@@ -42,3 +45,27 @@ def test_cached_comma_decision_is_labelled_cache(monkeypatch):
     commas = [c for c in r.changes if c.check == "commas"]
     assert len(commas) == 1 and commas[0].decided_by == "cache"
     assert apply_changes(text, r.changes) == r.text
+
+
+class Fake(Endpoint):
+    def chat(self, system, user, timeout=None, json_mode=True):
+        if "comma placement" in system:
+            return json.dumps({"changed": [], "notes": []})
+        ds = []
+        for line in user.splitlines():
+            if line.startswith("Item "):
+                options = [o.split("] ", 1)[-1] for o in line.split("options: ")[1].split(" | ")]
+                ds.append({"id": int(line.split()[1]), "choice": options[0],
+                           "confidence": 0.9, "reason": "model says so"})
+        return json.dumps({"decisions": ds})
+
+
+def test_model_decided_compound_is_labelled_model(monkeypatch):
+    fixture = (Path(__file__).parent / "fixtures" / "typos.lt.json").read_text()
+    monkeypatch.setattr(api, "find_languagetool", lambda: "/replay/languagetool")
+    monkeypatch.setattr(api, "run_languagetool", lambda t, target, level="default": parse_matches(fixture, t))
+    r = api.fix(TYPOS, api.Options(skip=frozenset({"typos", "commas"})),
+                Fake(url="http://x/v1", model="m"), Cache(None), CommaCache(None))
+    assert apply_changes(TYPOS, r.changes) == r.text
+    third = [c for c in r.changes if c.after == "-" and c.decided_by == "model"]
+    assert third and third[0].check == "adjudicated" and third[0].reason == "model says so"

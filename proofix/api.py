@@ -94,7 +94,6 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     decisions: list[Decision] = []
     review: list[Match] = []
     review_items: list[ReviewItem] = []
-    compound_ann: list[Annotation] = []
     lt_wanted = not {"mechanical", "adjudicated"} <= skip
     lt = find_languagetool() if lt_wanted else None
     lt_missing = lt_wanted and not lt
@@ -150,8 +149,6 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
                     rep = consistency._recase(g.form, d.replacement.lower())
                     c_edits.append(Edit(line, col, col + (g.end - g.start) - 1, g.form, rep,
                                         "adjudicated"))
-                    compound_ann.append(Annotation(g.form, rep, "adjudicated", d.reason,
-                                                   _decided_by(d, ep is not None), d.confidence))
             decisions += c_decisions
             new_text, rejected = apply_edits(text, c_edits)
             applied += [e for e in c_edits if e not in rejected]
@@ -177,7 +174,6 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
             by = "cache" if r.reason.endswith("(cached)") else ("model" if ep is not None else "rule")
             for e in comma_edits(before_commas, r.sentence, r.new_text):
                 ann.append(Annotation(e.original, e.replacement, "commas", r.reason, by, r.confidence))
-    ann += compound_ann
     for d in decisions:
         if d.replacement:
             ann.append(Annotation(d.item.word, d.replacement, "adjudicated", d.reason,
