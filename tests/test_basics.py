@@ -324,3 +324,41 @@ def test_skip_basics_with_lt_no_double_routing(monkeypatch):
     r = run("How do you know that that is wrong?\n", skip=frozenset({"typos"}))
     assert len(_repeat_reviews(r)) == 1
     assert run("The end , ok.\n", skip=frozenset({"typos"})).text == "The end , ok.\n"   # no spacing with LT
+
+
+# Fix round 3: pass 1's repeat edit loses to an overlapping whitespace edit and there is no pass 2.
+
+def _two_space_replay(monkeypatch):
+    text = "We saw the  the dog.\n"
+    off = text.index("the")
+    ws = text.index("  ")
+    _replay(monkeypatch, json.dumps({"matches": [
+        {"message": "Possible typo: you repeated a word.", "replacements": [{"value": "the"}],
+         "offset": off, "length": 8, "context": {"text": text, "offset": off, "length": 8},
+         "rule": {"id": "ENGLISH_WORD_REPEAT_RULE", "category": {"id": "MISC"}}},
+        {"message": "Possible typo: you repeated a whitespace", "replacements": [{"value": " "}],
+         "offset": ws, "length": 2, "context": {"text": text, "offset": ws, "length": 2},
+         "rule": {"id": "WHITESPACE_RULE", "category": {"id": "TYPOGRAPHY"}}}]}))
+    return text
+
+
+def _check_two_spaces(text, skip):
+    r = run(text, skip=frozenset(skip))
+    if "basics" in skip:
+        assert r.text in ("We saw the the dog.\n", "We saw the dog.\n")
+        if r.text != "We saw the dog.\n":
+            assert "repeated word 'the the'" in [i.message for i in r.review]
+    else:
+        assert r.text == "We saw the dog.\n"
+        assert _repeat_reviews(r) == []
+
+
+@pytest.mark.parametrize("skip", [{"typos", "adjudicated"}, {"typos", "adjudicated", "basics"}])
+def test_rejected_repeat_without_pass_2_replayed(monkeypatch, skip):
+    _check_two_spaces(_two_space_replay(monkeypatch), skip)
+
+
+@needs_lt
+@pytest.mark.parametrize("skip", [{"typos", "adjudicated"}, {"typos", "adjudicated", "basics"}])
+def test_rejected_repeat_without_pass_2_real_lt(skip):
+    _check_two_spaces("We saw the  the dog.\n", skip)

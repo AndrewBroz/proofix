@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, replace
@@ -140,9 +141,11 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     pre_text = text
     text, rejected = apply_edits(text, edits)
     applied = [e for e in edits if e not in rejected]
+    p1_rejected_repeats = [e for e in rejected if e.source == REPEAT]
+    lt_pass2 = bool(lt) and "adjudicated" not in skip
     # Pass 2: judgement calls on the cleaned text, so spans no longer collide.
     review_text = text
-    if lt and "adjudicated" not in skip:
+    if lt_pass2:
         matches = run_languagetool(text, o.target, o.lt_level)
         part = partition(text, matches, accept, adjudicate_available=asking)
         # anything pass 1 exposed, or a repeat pass 1 did not catch ("the  the")
@@ -160,11 +163,15 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
                 | {_line_col(text, m.start) for m in review if m.rule in (REPEAT, "basics")})
         next_id = max((i.id for i in part.items), default=0) + 1
         spans = protected_spans(text)
+        seen |= {(e.line, e.start) for e in edits if e.source == REPEAT}
         for d in basics.doubled_words(text, spans):
             route = double_route(d, asking)
-            if route == "edit" or accepted_double(text, d, accept) or _line_col(text, d.first_start) in seen:
+            if accepted_double(text, d, accept) or _line_col(text, d.first_start) in seen:
                 continue
-            if route == "item":
+            if route == "edit":       # one pass 1 could not apply ("the  the" beside a whitespace fix)
+                edits.append(basics.double_edit(text, d))
+                seen.add(_line_col(text, d.first_start))
+            elif route == "item":
                 part.items.append(double_item(text, d, next_id))
                 next_id += 1
             else:      # listed with LanguageTool's review matches, so the CLI shows it too
@@ -173,6 +180,18 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
         if use_spacing:
             review += [Match(p, p + 1, "basics", "", f"space before '{mark}'", "")
                        for p, mark in basics.spacing_notes(text, spans)]
+    if not lt_pass2 and p1_rejected_repeats:
+        # A pass-1 repeat edit that lost to an overlapping edit, with no pass 2 to catch it
+        # and basics not routing it either: a person decides, nothing is dropped silently.
+        routed = ({(e.line, e.start) for e in edits} | {(i.line, i.start) for i in part.items}
+                  | {_line_col(text, m.start) for m in review})
+        for e in p1_rejected_repeats:
+            pos = _shifted(pre_text, applied, to_offsets(pre_text, e)[0])
+            m = re.match(r"([^\W\d_]\S*)[ \t]+(\S+)", text[pos:])
+            if not m or m.group(1).lower() != m.group(2).lower() or _line_col(text, pos) in routed:
+                continue
+            review.append(Match(pos, m.end() + pos, REPEAT, "",
+                                f"repeated word '{m.group(1)} {m.group(2)}'", ""))
     system = system_prompt(TASK.format(variety=VARIETY[o.target]))
     if part.items:
         decisions = adjudicate(ep, f"proofix|{o.target}", part.items, cache,
