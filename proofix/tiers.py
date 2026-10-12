@@ -274,18 +274,20 @@ def partition(text: str, matches: list[Match], accept: set[str] | None = None,
 # word; no other common English word one transposition or insertion away, except where
 # that word is no plausible intent (teh/tech, hte/hate, adn/Dan, wih/wish). Left out:
 # jargon corrections (cmo, fpt, gti, jkd, slq, sxl, unx), dialect or loaded (wha, gya),
-# unclear (abl, bse, daa, ede, edn). "nd" is accepted by the Polish checker only, as the
+# unclear (abl, bse, daa, ede, edn), and plausible in a note (vey as in "oy vey"; wth,
+# wya, suh: shorthand or slang; ehr, hsa: lower-case acronyms). "nd" is accepted by the Polish checker only, as the
 # abbreviation "nd."; kept by ruling.
 SAFE_SHORT_TYPOS = frozenset(
-    "teh hte adn wih nd ehr eyt fwe hda hpe hsa hsi hve ihs kow mch muc nly nwe nwo onl oru "
-    "oyu suh tey thm tke vey viw whn wht woh wrk wth wya ype yuo".split())
+    "teh hte adn wih nd eyt fwe hda hpe hsi hve ihs kow mch muc nly nwe nwo onl oru "
+    "oyu tey thm tke viw whn wht woh wrk ype yuo".split())
 # A typo that one apostrophe turns into a contraction ("youre", "whos", "dont") may be
 # the contraction, not typos' correction ("your", "whose"): never applied outright.
 CONTRACTIONS = frozenset(
     "i'm i've i'd i'll you're you've you'd you'll he's he'd he'll she's she'd she'll it's "
     "it'd we're we've we'd we'll they're they've they'd they'll who's who'd what's that's "
     "there's here's let's don't doesn't didn't can't won't wouldn't shouldn't couldn't "
-    "isn't aren't wasn't weren't hasn't haven't hadn't ain't".split())
+    "isn't aren't wasn't weren't hasn't haven't hadn't ain't where's how's why's when's "
+    "could've should've would've must've might've".split())
 _CONTRACTION_SHAPED = frozenset(c.replace("'", "") for c in CONTRACTIONS)
 
 

@@ -397,3 +397,28 @@ def test_hygiene_still_removes_stray_invisible_characters():
     for text in ("A wo​rd here.\n", "Soft­hyphen here.\n", "ten⁠km away\n"):
         edits, _ = hygiene.plan(text)
         assert len(edits) == 1, text
+
+
+# --- fix round 2 ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("typo, correction", [
+    ("wheres", "whereas"), ("hows", "how"), ("whys", "why"), ("whens", "when"),
+    ("couldve", "could"), ("shouldve", "should"), ("wouldve", "would"), ("mustve", "must"),
+    ("mightve", "might"),
+])
+def test_more_contraction_shaped_typos_held_back(typo, correction):
+    text = f"x {typo} y\n"
+    out = _typo(1, 2, typo, correction)
+    assert tiers.typos_edits(text, out) == []
+    assert tiers.typos_matches(text, out)
+
+
+def test_plausible_short_words_not_on_the_safe_list():
+    assert not {"vey", "wth", "wya", "ehr", "hsa", "suh"} & tiers.SAFE_SHORT_TYPOS
+
+
+@needs_typos
+@pytest.mark.parametrize("text", ["So wheres the file?\n", "Oy vey, what a day.\n"])
+def test_real_typos_wheres_and_oy_vey_not_applied(monkeypatch, text):
+    _no_lt(monkeypatch)
+    assert fix(text).text == text
