@@ -147,3 +147,58 @@ def test_hygiene_entities_and_invisibles():
                           "zerowidth, softhyphen, code `&#32;` and [x](http://a/b&#32;c).\n")
     msgs = " ".join(n.message for n in plan_notes)
     assert "&lt;" in msgs and "&amp;" in msgs and "&nbsp;" in msgs and "zero-width space" in msgs
+
+
+def _lt_json(text, start16, len16, ctx_text, ctx16, replacement=" ", rule="CONSECUTIVE_SPACES"):
+    """A LanguageTool match as LanguageTool writes it: offsets in UTF-16 code units."""
+    return json.dumps({"matches": [{
+        "message": "m", "shortMessage": "", "replacements": [{"value": replacement}],
+        "offset": start16, "length": len16,
+        "context": {"text": ctx_text, "offset": ctx16, "length": len16},
+        "rule": {"id": rule, "category": {"id": "TYPOGRAPHY"}}}]})
+
+
+def _u16(s):
+    return len(s.encode("utf-16-le")) // 2
+
+
+def test_parse_matches_converts_utf16_offsets_from_languagetool():
+    # Captured from LanguageTool 6.8: offset 17 for the double space at code point 15.
+    text = "😀😀 It was nice,  ok.\n"
+    ms = parse_matches(_lt_json(text, 17, 2, "😀😀 It was nice,  ok. ", 17), text)
+    assert [(m.start, m.end) for m in ms] == [(15, 17)]
+    assert text[ms[0].start:ms[0].end] == "  "
+
+
+def test_parse_matches_utf16_zwj_sequence_in_document_and_context():
+    head = "Line one 👩\u200d💻 and 🏳\ufe0f\u200d🌈 here.\n" * 3
+    text = head + "Then teh word.\n"
+    pos = text.index("teh")
+    ctx = "🏳\ufe0f\u200d🌈 here.\nThen teh word."
+    ms = parse_matches(_lt_json(text, _u16(text[:pos]), 3, ctx, _u16(ctx[:ctx.index("teh")]),
+                                "the", "MORFOLOGIK_RULE_EN_US"), text)
+    assert [(m.start, m.end) for m in ms] == [(pos, pos + 3)]
+
+
+def test_proofix_fix_lands_on_the_right_characters_after_emoji(monkeypatch):
+    from adjudicate import Cache
+    from proofix import api
+    from proofix.commas import CommaCache
+    text = "😀😀 It was nice,  ok.\n"
+    fixture = _lt_json(text, 17, 2, "😀😀 It was nice,  ok. ", 17, rule="WHITESPACE_RULE")
+    monkeypatch.setattr(api, "find_languagetool", lambda: "/replay/languagetool")
+    monkeypatch.setattr(api, "run_languagetool", lambda t, target, level="default": parse_matches(fixture, t))
+    r = api.fix(text, api.Options(skip=frozenset({"commas"})), None, Cache(None), CommaCache(None))
+    assert r.text == "😀😀 It was nice, ok.\n"
+
+
+def test_hygiene_keeps_zwj_inside_emoji_sequences():
+    from proofix.hygiene import plan
+    for seq in ("👩\u200d💻", "👩\u200d👩\u200d👧", "🏳\ufe0f\u200d🌈", "👋🏽\u200d🙂", "❤\ufe0f\u200d🔥"):
+        text = f"Look {seq} here.\n"
+        edits, notes = plan(text)
+        new, _ = apply_edits(text, edits)
+        assert new == text, seq
+    text = "zero\u200dwidth joiner and \u200d alone\n"
+    new, _ = apply_edits(text, plan(text)[0])
+    assert new == "zerowidth joiner and  alone\n"

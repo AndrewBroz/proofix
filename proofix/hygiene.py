@@ -4,7 +4,8 @@ HTML entities that Markdown can carry as plain characters are decoded
 (&#32; is a space, &quot; a quote, &mdash; a dash); the ones that change
 Markdown's parsing (&lt;, &gt;, &amp; before a name) or carry meaning
 (&nbsp;) are left alone and reported. Invisible characters (zero-width
-spaces, byte-order marks, soft hyphens) are removed. Windows line endings
+spaces, byte-order marks, soft hyphens) are removed; a zero-width joiner
+is kept where it joins an emoji sequence. Windows line endings
 and decomposed accents are normalised before anything else runs. Code,
 links and front matter are never touched."""
 
@@ -19,6 +20,7 @@ from adjudicate import Edit, protected_spans
 
 _ENTITY = re.compile(r"&(?:#\d+|#x[0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);")
 _INVISIBLE = re.compile("[​‌‍⁠﻿­]")
+_ZWJ = "\u200d"
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # Decoded characters that would change how Markdown parses the line.
 _UNSAFE_DECODED = set("<>*_`#[]\\|")
@@ -49,6 +51,19 @@ def normalize_text(text: str) -> tuple[str, list[str]]:
         text = nfc
         notes.append(f"normalised {changed} decomposed character(s) to composed form (NFC)")
     return text, notes
+
+
+def _pictographic(ch: str) -> bool:
+    """Emoji-like characters a zero-width joiner may join (woman + ZWJ + laptop,
+    flag + VS-16 + ZWJ + rainbow): the emoji blocks, skin-tone modifiers and the
+    emoji presentation selector."""
+    o = ord(ch)
+    return 0x1F000 <= o <= 0x1FAFF or 0x2600 <= o <= 0x27BF or o == 0xFE0F
+
+
+def _joins_emoji(text: str, pos: int) -> bool:
+    return (0 < pos < len(text) - 1 and _pictographic(text[pos - 1])
+            and _pictographic(text[pos + 1]) and text[pos + 1] != "\ufe0f")
 
 
 def _line(text: str, pos: int) -> int:
@@ -93,6 +108,8 @@ def plan(text: str) -> tuple[list[Edit], list[Note]]:
     for m in _INVISIBLE.finditer(text):
         if protected(m.start()):
             continue
+        if m.group(0) == _ZWJ and _joins_emoji(text, m.start()):
+            continue                     # part of an emoji sequence, not stray
         col = _col(text, m.start())
         edits.append(Edit(_line(text, m.start()), col, col, m.group(0), "", "hygiene"))
         notes.append(Note(_line(text, m.start()), NAMES.get(m.group(0), "invisible character"),
