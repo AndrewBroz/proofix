@@ -166,9 +166,13 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     # Pass 1: mechanical faults (typos, whitespace, doubled punctuation), applied.
     pass1_review: list[Match] = []
     lt_repeats: set[tuple[int, int]] = set()
-    if lt and "mechanical" not in skip:
+    lt_p1 = bool(lt) and "mechanical" not in skip
+    lt_flagged: set[int] = set()          # where pass 1's LanguageTool saw a repeated word
+    unflagged: list[int] = []             # closed-list doubles it did not see: routed, not applied
+    if lt_p1:
         matches = run_languagetool(text, o.target, o.lt_level, disabled=disabled, server=lt_server,
                                    ensure=ensure)
+        lt_flagged = {m.start for m in matches if m.rule == REPEAT}
         p1 = partition(text, matches, accept, adjudicate_available=False)
         edits += p1.edits
         lt_repeats = {(e.line, e.start) for e in p1.edits if e.source == REPEAT}
@@ -181,12 +185,18 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
         for d in basics.doubled_words(text, spans):
             if double_route(d, asking) != "edit" or accepted_double(text, d, accept):
                 continue
+            if lt_p1 and d.first_start not in lt_flagged:
+                # LanguageTool knows exceptions the closed list does not: its silence means
+                # a model or a person decides (below, on the cleaned text).
+                unflagged.append(d.first_start)
+                continue
             e = basics.double_edit(text, d)
             if (e.line, e.start) not in lt_repeats:        # LanguageTool's edit is the one kept
                 edits.append(e)
     pre_text = text
     text, rejected_p1 = apply_edits(text, edits)
     applied = [e for e in edits if e not in rejected_p1]
+    unflagged_at = {_line_col(text, _shifted(pre_text, applied, p)) for p in unflagged}
     p1_rejected_repeats = [e for e in rejected_p1 if e.source == REPEAT]
     lt_pass2 = bool(lt) and "adjudicated" not in skip
     # Pass 2: judgement calls on the cleaned text, so spans no longer collide.
@@ -216,6 +226,10 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
             route = double_route(d, asking)
             if accepted_double(text, d, accept) or _line_col(text, d.first_start) in seen:
                 continue
+            # A closed-list double LanguageTool ran over and did not flag (pass 2 did not, or
+            # pass 1 did not and there is no pass 2): a model or a person decides.
+            if route == "edit" and (lt_pass2 or _line_col(text, d.first_start) in unflagged_at):
+                route = "item" if asking else "review"
             if route == "edit":       # one pass 1 could not apply ("the  the" beside a whitespace fix)
                 edits.append(basics.double_edit(text, d))
                 seen.add(_line_col(text, d.first_start))

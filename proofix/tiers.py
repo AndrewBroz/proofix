@@ -193,12 +193,14 @@ def double_route(d: Double, adjudicate_available: bool) -> str:
 def _repeat_double(text: str, m: Match) -> Double | None:
     """A LanguageTool repeat basics' pattern did not match ("3rd 3rd"): routed as a
     double that is not on the closed list, unless it spans a line (the structural
-    cases: a blank line, a list, quote, heading or table line) or is a capitalised
-    pair that is not on the closed list (a name)."""
+    cases: a blank line, a list, quote, heading or table line), touches a hyphen, or
+    is a capitalised pair that is not on the closed list (a name)."""
     original = text[m.start:m.end]
     parts = original.split()
     if "\n" in original or len(parts) != 2:
         return None
+    if text[m.start - 1:m.start] == "-" or text[m.end:m.end + 1] == "-":
+        return None                       # part of a compound: "to to-do", "for for-profit"
     first, second = parts
     capitalised = first[:1].isupper() and second[:1].isupper()
     if capitalised and first.lower() not in CLOSED_DOUBLES:

@@ -106,9 +106,10 @@ def test_basics_does_not_run_with_languagetool(monkeypatch):
     monkeypatch.setattr(api, "run_languagetool", lambda *a, **k: [])     # LanguageTool "runs", finds nothing
     r = run("The the end , ok.\n")
     # Fix round 2 ruling: doubled words run alongside LanguageTool; spacing does not.
-    assert not [e for e in r.applied if e.source == "basics" and "the" not in e.original.lower()]
-    assert r.text.startswith("The end , ok.")
-    assert len([e for e in r.applied if e.original == "The the"]) == 1
+    # Final review ruling R1: a closed-list double LanguageTool did not flag is routed.
+    assert not [e for e in r.applied if e.source == "basics"]
+    assert r.text == "The the end , ok.\n"
+    assert "repeated word 'The the'" in [i.message for i in r.review]
 
 
 def test_languagetool_repeat_outside_closed_list_is_reviewed(replay_lt_repeat):
@@ -362,3 +363,66 @@ def test_rejected_repeat_without_pass_2_replayed(monkeypatch, skip):
 @pytest.mark.parametrize("skip", [{"typos", "adjudicated"}, {"typos", "adjudicated", "basics"}])
 def test_rejected_repeat_without_pass_2_real_lt(skip):
     _check_two_spaces("We saw the  the dog.\n", skip)
+
+
+# Final review, ruling R1: the closed list holds only words whose doubling is never
+# grammatical; a hyphen touching either copy is no double; LanguageTool's silence vetoes.
+
+PROBES = ["Add it to to-do list.\n", "Check the in in-house tools.\n", "A for for-profit firm.\n",
+          "Please log in in the top-right corner.\n", "He came in in a hurry.\n",
+          "Turn it on on Monday.\n"]
+
+
+def test_closed_list_drops_in_on_by_about():
+    assert not {"in", "on", "by", "about"} & basics.CLOSED_DOUBLES
+    assert basics.CLOSED_DOUBLES == frozenset(
+        "a an the of to at for with from into onto and or but nor it we they my your our their".split())
+
+
+@pytest.mark.parametrize("text", ["Add it to to-do list.\n", "for for-profit\n", "in in-house\n",
+                                  "a pre-the the\n", "the-the the\n"])
+def test_a_hyphen_touching_either_copy_is_no_double(text):
+    assert basics.doubled_words(text, []) == []
+
+
+@pytest.mark.parametrize("text", PROBES)
+def test_probes_never_applied_without_tools(monkeypatch, text):
+    monkeypatch.setenv("PATH", "/nonexistent")
+    assert run(text).text == text
+    assert run(text, ep=FakeEndpoint(choice="KEEP")).text == text
+
+
+@pytest.mark.parametrize("text", PROBES)
+def test_probes_never_applied_with_silent_languagetool(monkeypatch, text):
+    monkeypatch.setenv("PATH", "/nonexistent")
+    monkeypatch.setattr(api, "find_languagetool", lambda: "/replay/languagetool")
+    monkeypatch.setattr(api, "run_languagetool", lambda *a, **k: [])
+    assert run(text).text == text
+    assert run(text, skip=frozenset({"adjudicated"})).text == text
+
+
+def test_closed_double_languagetool_does_not_flag_is_routed_not_applied(monkeypatch):
+    monkeypatch.setenv("PATH", "/nonexistent")
+    monkeypatch.setattr(api, "find_languagetool", lambda: "/replay/languagetool")
+    monkeypatch.setattr(api, "run_languagetool", lambda *a, **k: [])     # runs, flags nothing
+    for skip in (frozenset(), frozenset({"adjudicated"})):
+        r = run("We got the the scheme.\n", skip=skip)
+        assert r.text == "We got the the scheme.\n"
+        assert "repeated word 'the the'" in [i.message for i in r.review]
+    r = run("We got the the scheme.\n", ep=FakeEndpoint(choice="KEEP"))
+    assert r.text == "We got the the scheme.\n"
+    assert [d.item.word for d in r.decisions] == ["the the"]
+    assert run("We got the the scheme.\n", ep=FakeEndpoint(choice=1)).text == "We got the scheme.\n"
+
+
+@needs_lt
+@pytest.mark.parametrize("text", PROBES)
+def test_probes_never_applied_with_real_languagetool(text):
+    assert run(text, skip=frozenset({"typos"})).text == text
+    assert run(text, skip=frozenset({"typos"}), ep=FakeEndpoint(choice="KEEP")).text == text
+
+
+@needs_lt
+def test_real_lt_still_fixes_the_the_and_of_of():
+    assert run("We got the the scheme, most of of it.\n", skip=frozenset({"typos"})).text == \
+        "We got the scheme, most of it.\n"

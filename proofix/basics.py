@@ -7,14 +7,17 @@ from adjudicate import Edit
 
 # Words whose doubling is never grammatical in prose: removing one copy is
 # always right. Any other double ("that that", "had had", "very very") is a
-# judgement call: adjudicated with a model, listed for review without one.
-CLOSED_DOUBLES = frozenset("a an the of to in on at for with from by into onto about "
+# judgement call: adjudicated with a model, listed for review without one. Not
+# here: in, on, by, about, which double as particles before a preposition ("log in
+# in the corner", "came in in a hurry", "turn it on on Monday").
+CLOSED_DOUBLES = frozenset("a an the of to at for with from into onto "
                            "and or but nor it we they my your our their".split())
 # The same word (any letters, inner apostrophes: "café", "it's") twice, separated
 # by spaces or tabs, or by a newline within the paragraph that does not open a
-# list, quote, heading or table line.
+# list, quote, heading or table line. A hyphen touching either copy makes it part
+# of a compound ("to to-do", "for for-profit", "pre-the the"): no double.
 _WORD = r"[^\W\d_]+(?:['\u2019][^\W\d_]+)*"
-_DOUBLE = re.compile(rf"(?<![\w'\u2019])({_WORD})([ \t]+|\n(?![ \t]*(?:[-*+>#|]|\d+[.)])))(\1)(?![\w'\u2019])",
+_DOUBLE = re.compile(rf"(?<![\w'\u2019-])({_WORD})([ \t]+|\n(?![ \t]*(?:[-*+>#|]|\d+[.)])))(\1)(?![\w'\u2019-])",
                      re.I)
 
 DOUBLE_RULE = ("A word is repeated. Choose the single word if the repeat is a typo. KEEP if it is "
