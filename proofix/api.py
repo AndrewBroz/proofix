@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, replace
 
-from adjudicate import Annotation, Change, ReviewItem, Skipped, derive_changes
+from adjudicate import Annotation, Change, ReviewItem, Skipped, compose, derive_changes
 from adjudicate import Cache, Edit, adjudicate, apply_edits, protected_spans, system_prompt
 from adjudicate.apply import to_offsets
 from adjudicate.core import Decision
@@ -80,10 +80,12 @@ def lt_disabled(o: Options) -> list[str]:
 
 
 def _overlap_reviews(before: str, applied: list[Edit], rejected: list[Edit], after: str,
-                     routed: set[tuple[int, int]], at_before: bool = False) -> list[Match]:
+                     routed: set[tuple[int, int]], at_before: bool = False,
+                     rules: dict | None = None) -> list[Match]:
     """Review matches for edits apply_edits rejected because another edit overlapped them,
     where the original is still in the text: nothing is dropped silently. Positions are in
-    `after`, or in `before` with at_before (when the review list is read against it)."""
+    `after`, or in `before` with at_before (when the review list is read against it).
+    `rules` names the LanguageTool rule behind a model's edit (its source is "adjudicated")."""
     out = []
     for e in rejected:
         s, _ = to_offsets(before, e)
@@ -98,9 +100,75 @@ def _overlap_reviews(before: str, applied: list[Edit], rejected: list[Edit], aft
         if key in routed:
             continue
         routed.add(key)
+        rule = (rules or {}).get((e.line, e.start, e.original, e.replacement))
         out.append(Match(where, where + len(e.original), e.source, "",
-                         f"'{e.original}' -> '{e.replacement}' not applied: it overlaps another edit", ""))
+                         f"'{e.original}' -> '{e.replacement}' not applied: it overlaps another edit"
+                         + (f" ({rule})" if rule else ""), ""))
     return out
+
+
+def _unshifted(text: str, applied: list[Edit], pos: int) -> int:
+    """Where offset `pos` of the text `applied` (edits on `text`) produced was in `text`;
+    inside a replacement, the start of the text it replaced."""
+    delta = 0
+    for s, t, n in sorted((*to_offsets(text, e), len(e.replacement)) for e in applied):
+        if pos < s + delta:
+            break
+        if pos < s + delta + n:
+            return s
+        delta += n - (t - s)
+    return pos - delta
+
+
+def _input_line(stages: list[tuple[str, list[Edit]]], pos: int) -> int:
+    """The line of fix()'s input that offset `pos` of the text after `stages` (each a text
+    and the edits applied to it) came from: review lines are the reader's lines."""
+    for before, applied in reversed(stages):
+        pos = _unshifted(before, applied, pos)
+    return _line_of(stages[0][0], pos)
+
+
+def _line_start(text: str, line: int) -> int:
+    pos = 0
+    for _ in range(line - 1):
+        nxt = text.find("\n", pos)
+        if nxt < 0:
+            break
+        pos = nxt + 1
+    return pos
+
+
+def _quoted(message: str, word: str) -> bool:
+    return any(f"{a}{word}{b}" in message for a, b in (("'", "'"), ("\u2018", "\u2019"), ('"', '"'),
+                                                         ("\u201c", "\u201d")))
+
+
+def _named(text: str, m: Match) -> Match:
+    """A review match whose message names the text it flags ("'colur': Possible spelling
+    mistake found."), unless the message already quotes it."""
+    word = " ".join(text[m.start:m.end].split())
+    if not word or _quoted(m.message, word):
+        return m
+    return replace(m, message=f"'{word}': {m.message}")
+
+
+def _staged_changes(original: str, middle: str, final: str, first_ann: list[Annotation],
+                    rest_ann: list[Annotation]) -> list[Change]:
+    """Changes original -> final, labelled stage by stage: pass 1's on original -> middle,
+    the rest on middle -> final, composed onto the original. A later change that overlaps
+    a pass-1 change replaces it (one change, labelled by the later edit)."""
+    first = derive_changes(original, middle, first_ann, "proofix")
+    second = derive_changes(middle, final, rest_ann, "proofix")
+    for n, c in enumerate(first, 1):
+        c.id = f"a{n}"
+    for n, c in enumerate(second, 1):
+        c.id = f"b{n}"
+    composed = compose(original, middle, first, second)
+    superseded = {d for c in composed for d in c.depends_on}
+    out = [c for c in composed if c.id not in superseded]
+    for c in out:
+        c.id, c.depends_on = "", ()
+    return sorted(out, key=lambda c: (c.start, c.end))
 
 
 def _decided_by(d: Decision, model_used: bool) -> str:
@@ -196,15 +264,18 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
     pre_text = text
     text, rejected_p1 = apply_edits(text, edits)
     applied = [e for e in edits if e not in rejected_p1]
+    stages: list[tuple[str, list[Edit]]] = [(pre_text, list(applied))]
     unflagged_at = {_line_col(text, _shifted(pre_text, applied, p)) for p in unflagged}
     p1_rejected_repeats = [e for e in rejected_p1 if e.source == REPEAT]
     lt_pass2 = bool(lt) and "adjudicated" not in skip
+    item_rules: dict[int, str] = {}       # item id -> the rule that raised it
     # Pass 2: judgement calls on the cleaned text, so spans no longer collide.
     review_text = text
     if lt_pass2:
         matches = run_languagetool(text, o.target, o.lt_level, disabled=disabled, server=lt_server,
                                    ensure=ensure)
         part = partition(text, matches, accept, adjudicate_available=asking)
+        item_rules.update(part.rules)
         # Pass 2's outright edits are audited like pass 1's: anything pass 1 exposed, a repeat
         # pass 1 did not catch ("the  the"), or an edit that lost to an overlapping one there.
         edits = list(part.edits)
@@ -269,12 +340,18 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
                     continue              # an overlapping fix changed the word
                 s = found
             key = _line_col(text, s)
+            held = replace(m, start=s, end=s + len(word))
             if key in routed:
+                # typos' reason names the word and its correction: it replaces a
+                # LanguageTool review of the same word ("Possible spelling mistake found.")
+                same = [k for k, r in enumerate(review) if r.start == s and r.end == s + len(word)]
+                if same and not asking:
+                    review[same[0]] = held
                 continue
             routed.add(key)
-            held = replace(m, start=s, end=s + len(word))
             if asking:
                 part.items.append(typos_item(text, held, next_id))
+                item_rules[next_id] = "TYPOS"
                 next_id += 1
             else:
                 review.append(held)
@@ -285,6 +362,7 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
                                            [e for e in rejected_p1 if e.source != REPEAT], text, routed)
                if not any(s < m.end and m.start < t for s, t in covered)]
     system = system_prompt(TASK.format(variety=VARIETY[o.target]))
+    adj_rules: dict[tuple, str] = {}
     if part.items:
         decisions = adjudicate(ep, f"proofix|{o.target}", part.items, cache,
                                parallel=o.parallel, verbose=o.verbose, system=system,
@@ -293,15 +371,20 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
             if d.choice is not None and d.confidence < o.min_confidence:
                 d.reason, d.choice = f"low confidence ({d.confidence:.2f}): {d.reason}", None
             if d.replacement is not None:
-                edits.append(Edit(d.item.line, d.item.start, d.item.end, d.item.word,
-                                  d.replacement, "adjudicated"))
+                e = Edit(d.item.line, d.item.start, d.item.end, d.item.word, d.replacement, "adjudicated")
+                edits.append(e)
+                if d.item.id in item_rules:
+                    adj_rules[(e.line, e.start, e.original, e.replacement)] = item_rules[d.item.id]
     new_text, rejected = apply_edits(text, edits)
     pass2_applied = [e for e in edits if e not in rejected]
     # an edit (a decision, too) that lost to an overlapping one: listed unless already listed
     review += _overlap_reviews(text, pass2_applied, rejected, new_text,
-                               {_line_col(text, m.start) for m in review}, at_before=True)
+                               {_line_col(text, m.start) for m in review}, at_before=True,
+                               rules=adj_rules)
     applied += pass2_applied
-    text = new_text
+    stages.append((text, pass2_applied))
+    p2_items = {id(d.item) for d in decisions}
+    text = after_p2 = new_text
     # Pass 3: compounds and consistency, on the text as it now stands.
     if "compounds" not in skip and asking:
         c_items, groups = consistency.items(text, o.target, o.style)
@@ -324,6 +407,7 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
             decisions += c_decisions
             new_text, rejected = apply_edits(text, c_edits)
             applied += [e for e in c_edits if e not in rejected]
+            stages.append((text, [e for e in c_edits if e not in rejected]))
             text = new_text
     new_text = text
 
@@ -352,21 +436,41 @@ def fix(text: str, options: Options, endpoint: Endpoint | None, cache: Cache,
                                   _decided_by(d, ep is not None), d.confidence))
     ann += [Annotation(e.original, e.replacement, e.source) for e in applied]
     changes = derive_changes(original, new_text, ann, "proofix")
+    if any(c.check == "proofix" for c in changes):
+        # A pass-1 edit can make the text a later edit applies to ("teh the" -> "the the"
+        # -> "the"), which no annotation reproduces on the original: label each stage on
+        # its own text and compose them, when that leaves fewer changes unlabelled.
+        p1 = len(stages[0][1])                 # applied[:p1] are pass 1's edits
+        n_plain = len(applied)
+        first_ann = ann[len(ann) - n_plain:len(ann) - n_plain + p1]
+        rest_ann = ann[:len(ann) - n_plain] + ann[len(ann) - n_plain + p1:]
+        staged = _staged_changes(original, review_text, new_text, first_ann, rest_ann)
+        if sum(c.check == "proofix" for c in staged) < sum(c.check == "proofix" for c in changes):
+            changes = staged
     for c in changes:
         c.pass_ = "proofix"
 
-    review_items += [ReviewItem(_line_of(review_text, m.start), "alert", m.message, m.rule, "proofix")
+    # Review lines are fix()'s input lines: each position is mapped back through the
+    # edits applied after the text it was found in (pass 1 can remove a line break).
+    review = [_named(review_text, m) for m in review]
+    review_items += [ReviewItem(_input_line(stages[:1], m.start), "alert", m.message, m.rule, "proofix")
                      for m in review]
-    review_items += [ReviewItem(d.item.line, "undecided",
+
+    def item_line(item) -> int:          # pass 2's items are on review_text, pass 3's on after_p2
+        if id(item) in p2_items:
+            return _input_line(stages[:1], _line_start(review_text, item.line))
+        return _input_line(stages[:2], _line_start(after_p2, item.line))
+
+    review_items += [ReviewItem(item_line(d.item), "undecided",
                                 (f"repeated word '{' '.join(d.item.word.split())}': {d.reason}"
                                  if d.item.source == "repeat" else f"'{d.item.word}': {d.reason}"),
                                 d.item.source, "proofix") for d in decisions if d.choice is None]
     for r in comma_results:
         if r.status in ("rejected", "note"):
-            review_items.append(ReviewItem(_line_of(before_commas, r.sentence.start),
+            review_items.append(ReviewItem(_input_line(stages, r.sentence.start),
                                            r.status, r.reason, "commas", "proofix"))
         elif r.status == "error" and r.reason != "no model configured":   # reported once, as a skipped capability
-            review_items.append(ReviewItem(_line_of(before_commas, r.sentence.start),
+            review_items.append(ReviewItem(_input_line(stages, r.sentence.start),
                                            "note", r.reason, "commas", "proofix"))
     return Result(new_text, changes, review_items, skipped, applied, decisions, comma_results,
                   review, typos_fixed, hygiene_notes, lt_missing)

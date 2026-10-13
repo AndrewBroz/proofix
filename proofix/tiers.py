@@ -4,7 +4,7 @@ and review, with Markdown structure protected."""
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from adjudicate import Edit, Item, protected_spans, sentence_context
 from adjudicate.apply import to_offsets
@@ -70,6 +70,7 @@ class Partition:
     edits: list[Edit]
     items: list[Item]
     review: list[Match]
+    rules: dict[int, str] = field(default_factory=dict)     # item id -> the LanguageTool rule behind it
 
 
 def _line_col(text: str, pos: int) -> tuple[int, int]:
@@ -215,6 +216,7 @@ def partition(text: str, matches: list[Match], accept: set[str] | None = None,
     edits: list[Edit] = mechanical_edits(text, spans)
     items: list[Item] = []
     review: list[Match] = []
+    rules: dict[int, str] = {}
     next_id = 1
     doubles = {(d.first_start, d.end): d for d in doubled_words(text, spans)}
     spacing: set[tuple[int, str, str]] | None = None
@@ -237,6 +239,7 @@ def partition(text: str, matches: list[Match], accept: set[str] | None = None,
                 edits.append(replace(double_edit(text, d), source=m.rule))
             elif route == "item":
                 items.append(double_item(text, d, next_id))
+                rules[next_id] = m.rule
                 next_id += 1
             else:
                 review.append(replace(m, message=double_message(text, d)))
@@ -263,10 +266,11 @@ def partition(text: str, matches: list[Match], accept: set[str] | None = None,
             items.append(Item(next_id, word, options, rule, sentence_context(text, start, end),
                               line, col, col + (end - start) - 1,
                               source="spelling" if m.rule in SPELLING else "grammar"))
+            rules[next_id] = m.rule
             next_id += 1
             continue
         review.append(m)
-    return Partition(edits, items, review)
+    return Partition(edits, items, review, rules)
 
 
 # Short typos (three letters or fewer) typos may fix outright. Chosen from typos' own data

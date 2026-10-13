@@ -422,3 +422,86 @@ def test_plausible_short_words_not_on_the_safe_list():
 def test_real_typos_wheres_and_oy_vey_not_applied(monkeypatch, text):
     _no_lt(monkeypatch)
     assert fix(text).text == text
+
+
+# --- final review: review items name the flagged text; lines are the input's ---------
+
+def test_review_message_names_the_flagged_text(monkeypatch):
+    text = "The colur is nice.Then we went.\n"
+    replay(monkeypatch, text, fixture=_lt(
+        text, ("MORFOLOGIK_RULE_EN_US", 4, "colur", "color", "Possible spelling mistake found."),
+        ("SENTENCE_WHITESPACE", 18, "Then", " Then", "Add a space between sentences.")))
+    r = fix(text)
+    assert sorted(i.message for i in r.review) == [
+        "'Then': Add a space between sentences.", "'colur': Possible spelling mistake found."]
+    assert sorted(m.message for m in r.lt_review)[1].startswith("'colur': ")   # proofix's own CLI too
+
+
+def test_review_message_that_quotes_the_text_is_unchanged(monkeypatch):
+    monkeypatch.setenv("PATH", "/nonexistent")
+    r = fix("How do you know that that is wrong?\n")
+    assert [i.message for i in r.review] == ["repeated word 'that that'"]
+
+
+@needs_typos
+def test_typos_message_preferred_over_languagetool_at_the_same_word(monkeypatch):
+    text = "Teh plan was late.\n"
+    typos_dir = str(Path(shutil.which("typos")).parent)
+    replay(monkeypatch, text, fixture=_lt(
+        text, ("MORFOLOGIK_RULE_EN_US", 0, "Teh", "The", "Possible spelling mistake found.")))
+    monkeypatch.setenv("PATH", typos_dir)
+    r = fix(text)
+    assert [i.message for i in r.review] == ["'Teh' may be a misspelling of 'The'"]
+
+
+def test_review_lines_are_the_input_lines_after_a_cross_line_double(monkeypatch):
+    text = "We saw the\nthe dog.\n\nThe colur is nice.\n"
+    off = text.index("colur")
+    replay(monkeypatch, text, fixture=_lt(
+        text, ("ENGLISH_WORD_REPEAT_RULE", 7, "the\nthe", "the", "Possible typo: you repeated a word."),
+        ("MORFOLOGIK_RULE_EN_US", off, "colur", "color", "Possible spelling mistake found.")))
+    r = fix(text)
+    assert r.text == "We saw the dog.\n\nThe colur is nice.\n"
+    assert [(i.line, i.message) for i in r.review] == [(4, "'colur': Possible spelling mistake found.")]
+
+
+def test_undecided_lines_are_the_input_lines(monkeypatch):
+    monkeypatch.setenv("PATH", "/nonexistent")
+
+    class Unsure(FakeEndpoint):
+        def chat(self, system, user, timeout=None, json_mode=True):
+            if "comma placement" in system:
+                return json.dumps({"changed": [], "notes": []})
+            ids = [int(l.split()[1]) for l in user.splitlines() if l.startswith("Item ")]
+            return json.dumps({"decisions": [{"id": i, "choice": 1, "confidence": 0.1,
+                                              "reason": "t"} for i in ids]})
+    r = fix("We saw the\nthe dog.\n\nIt was very very good.\n", Unsure(1),
+            skip=frozenset({"commas", "compounds"}))
+    assert [i.line for i in r.review if i.kind == "undecided"] == [4]
+
+
+def test_overlap_review_names_the_underlying_rule(monkeypatch):
+    text = "We recieve it now.\n"
+    replay(monkeypatch, text, fixture=_lt(
+        text, ("GRAMMAR_A", 3, "recieve it", "receive it", "Spelling."),
+        ("GRAMMAR_B", 11, "it now", "it then", "Tense.")))
+    r = fix(text, FakeEndpoint(1), skip=frozenset({"commas", "compounds"}))
+    assert r.text == "We recieve it then.\n"
+    [lost] = [i for i in r.review if "overlaps another edit" in i.message]
+    assert "GRAMMAR_A" in lost.message
+
+
+@needs_typos
+@pytest.mark.parametrize("text, expected, labels", [
+    ("We saw teh the the plan.\n", "We saw the plan.\n", ["typos", "basics"]),
+    ("We saw teh the plan.\n", "We saw the plan.\n", ["typos", "basics"]),
+])
+def test_typo_that_makes_a_double_keeps_both_labels(monkeypatch, text, expected, labels):
+    # pass 1 fixes the typo, which makes (another) double that pass 2 removes: the
+    # changes are labelled from both passes, not left as one unlabelled deletion
+    _no_lt(monkeypatch)
+    r = fix(text)
+    assert r.text == expected
+    assert [c.check for c in r.changes] == labels
+    from adjudicate import apply_changes
+    assert apply_changes(text, r.changes) == expected
