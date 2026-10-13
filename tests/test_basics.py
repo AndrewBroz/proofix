@@ -426,3 +426,20 @@ def test_probes_never_applied_with_real_languagetool(text):
 def test_real_lt_still_fixes_the_the_and_of_of():
     assert run("We got the the scheme, most of of it.\n", skip=frozenset({"typos"})).text == \
         "We got the scheme, most of it.\n"
+
+
+# Final review, issue 4: an indented code block is code.
+
+CODE = "Some prose here.\n\n    print(a,b)\n    # of of\n    x = recieve(a)  # the the\n\nMore prose.\n"
+
+
+def test_indented_code_untouched_without_tools(monkeypatch):
+    monkeypatch.setenv("PATH", "/nonexistent")
+    r = run(CODE)
+    assert r.text == CODE and r.review == []
+
+
+@needs_lt
+def test_indented_code_untouched_with_tools():
+    r = run(CODE)
+    assert r.text == CODE
