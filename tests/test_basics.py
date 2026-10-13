@@ -443,3 +443,12 @@ def test_indented_code_untouched_without_tools(monkeypatch):
 def test_indented_code_untouched_with_tools():
     r = run(CODE)
     assert r.text == CODE
+
+
+def test_model_removed_double_is_labelled_by_the_model(monkeypatch):
+    # final review, issue 3: not "[proofix proofix, rule]" with no reason
+    monkeypatch.setenv("PATH", "/nonexistent")
+    r = run("How do you know that that is wrong?\n", ep=FakeEndpoint(choice=1))
+    assert r.text == "How do you know that is wrong?\n"
+    [c] = r.changes
+    assert (c.check, c.decided_by, c.reason) == ("adjudicated", "model", "t")
